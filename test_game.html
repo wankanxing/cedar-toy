@@ -1,0 +1,2382 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <title>CEDAR TOY · TEST</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Silkscreen:wght@400;700&display=swap" rel="stylesheet">
+  <style>
+    *, *::before, *::after { box-sizing: border-box; }
+    :root {
+      --bg: #FDF6F7;
+      --purple: #BEB1D1;
+      --purple-dark: #9B8DB5;
+      --purple-darker: #8678A0;
+      --purple-light: #E6DFF0;
+      --pink: #E6A8B1;
+      --pink-dark: #C28B93;
+      --text: #5C5463;
+      --muted: #9CA3AF;
+      --card: #FFFFFF;
+      --safe-bottom: env(safe-area-inset-bottom, 0px);
+    }
+    html { min-height: 100%; background: var(--bg); image-rendering: pixelated; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      color: var(--text);
+      background-color: var(--bg);
+      background-image:
+        linear-gradient(rgba(190, 177, 209, .1) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(190, 177, 209, .1) 1px, transparent 1px);
+      background-size: 20px 20px;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    }
+    button, a { font: inherit; }
+    button { cursor: pointer; touch-action: manipulation; }
+    .pixel, h1, h2, .eyebrow, .progress-label, .mode-code, .status-text {
+      font-family: "Silkscreen", "Microsoft YaHei", sans-serif;
+    }
+    .topbar {
+      min-height: 60px;
+      padding: 10px clamp(14px, 4vw, 30px);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 14px;
+      color: #fff;
+      background: var(--purple);
+      border-bottom: 4px solid var(--purple-dark);
+    }
+    .brand, .back-link { color: #fff; text-decoration: none; }
+    .brand { display: inline-flex; align-items: center; gap: 12px; font-size: clamp(17px, 4vw, 24px); }
+    .pixel-logo { width: 22px; height: 16px; border: 4px solid #fff; box-shadow: 8px 8px 0 -4px #fff; }
+    .back-link { font-size: 12px; padding: 8px; border: 2px solid rgba(255,255,255,.7); }
+    main { width: min(920px, calc(100% - 28px)); margin: 0 auto; padding: clamp(24px, 5vw, 48px) 0 calc(40px + var(--safe-bottom)); }
+    .hero { margin-bottom: 22px; }
+    .eyebrow { color: var(--pink-dark); font-size: 11px; letter-spacing: .08em; }
+    h1 { margin: 7px 0 6px; color: var(--purple-darker); font-size: clamp(26px, 7vw, 46px); line-height: 1.15; }
+    .hero p { margin: 0; color: var(--muted); font-size: 14px; }
+    .question-intro.page-disclaimer { margin: 14px 0 0; font-size: 12px; }
+    #source { overflow-wrap: anywhere; }
+    .page-disclaimer[hidden] { display: none; }
+    .hero .research-notice { margin-top: 10px; color: var(--text); font-size: 12px; line-height: 1.65; }
+    .research-details, .research-help { color: var(--text); font-size: 12px; line-height: 1.65; overflow-wrap: anywhere; }
+    .research-details summary { width: fit-content; min-height: 44px; padding: 12px 0; cursor: pointer; }
+    .research-meta { display: grid; grid-template-columns: 3em minmax(0, 1fr); gap: 8px 12px; margin: 0; padding: 12px 0; border-top: 2px solid var(--purple-light); text-align: left; }
+    .research-meta dt { font-weight: 700; }
+    .research-meta dd { min-width: 0; margin: 0; }
+    .research-meta a, .research-result a { color: var(--text); text-decoration: underline; text-underline-offset: 3px; }
+    .research-result { overflow-wrap: anywhere; }
+    .research-result .research-notice { margin: 0 0 16px; font-size: 12px; line-height: 1.65; }
+    .research-scores { margin: 0; }
+    .research-score { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: baseline; gap: 12px; padding: 12px 0; border-bottom: 2px solid var(--purple-light); }
+    .research-score:first-child { padding-top: 0; }
+    .research-score dt { font-size: 14px; line-height: 1.65; }
+    .research-score dd { margin: 0; font-size: 20px; font-weight: 700; font-variant-numeric: tabular-nums; text-align: right; white-space: nowrap; }
+    .research-score-maximum { color: var(--muted); font-size: 15px; font-weight: 600; }
+    .research-score-range { display: block; color: var(--muted); font-size: 12px; font-weight: 400; line-height: 1.5; }
+    .research-result .research-help { margin-top: 16px; }
+    .rbi-interpretation { margin-top: 22px; font-size: 14px; line-height: 1.8; }
+    .rbi-interpretation h3, .rbi-interpretation h4 { margin: 0 0 6px; font-size: 14px; }
+    .rbi-interpretation h4 { margin-top: 16px; }
+    .rbi-interpretation p { margin: 0; }
+    .rbi-interpretation .research-help { margin: 0 0 16px; }
+    .research-interpretation { margin-top: 26px; padding-top: 21px; border-top: 2px solid var(--purple-light); font-size: 14px; line-height: 1.8; overflow-wrap: anywhere; }
+    .research-interpretation h3 { margin: 0 0 10px; color: var(--purple-darker); font-size: 15px; }
+    .research-interpretation .research-summary { margin: 0; }
+    .research-interpretation .research-dimensions { margin-top: 23px; }
+    .research-interpretation .research-dimension { margin-top: 15px; padding: 0 0 13px; border-bottom: 1px solid var(--purple-light); }
+    .research-interpretation .research-dimension:last-child { border-bottom: 0; padding-bottom: 0; }
+    .research-interpretation .research-dimension h4 { margin: 0 0 5px; font-size: 14px; color: var(--text); }
+    .research-interpretation .research-dimension p { margin: 0; }
+    .research-interpretation .research-actions { margin-top: 22px; }
+    .research-interpretation .research-actions ol { margin: 0; padding-left: 22px; }
+    .research-interpretation .research-actions li { margin: 0 0 10px; padding-left: 2px; }
+    .research-help { margin: 12px 0 0; }
+    .research-help a { color: inherit; }
+    .research-page #questionIntro { color: var(--text); font-size: 13px; }
+    #questionIntro.mesx-intro { white-space: pre-line; }
+    /* Keep the programmatic reading position without a heading focus ring. */
+    .research-page #questionText:focus { outline: none; }
+    .research-page .question-actions { flex-wrap: wrap; }
+    .research-page .question-actions button { color: var(--text); font-size: 12px; min-height: 44px; }
+    .research-page .answer-button { min-height: 44px; padding: 8px 12px; font-size: 14px; }
+    .research-page .answer-button.selected, .research-page .scale-step.selected { color: var(--text); }
+    .mbti-scale-ends.research-scale-ends { gap: 16px; align-items: start; font-family: inherit; font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
+    .research-scale-ends span { flex: 1; min-width: 0; }
+    .research-scale-ends span:last-child { text-align: right; }
+    .research-scale-middle { margin: 0 0 7px; text-align: center; font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
+    .research-scale-selection { min-height: 1.65em; margin: 12px 0 0; font-size: 12px; line-height: 1.65; overflow-wrap: anywhere; }
+    .research-scale-key { margin-top: 4px; font-size: 12px; line-height: 1.65; overflow-wrap: anywhere; }
+    .research-scale-key summary { width: fit-content; min-height: 44px; padding: 12px 0; cursor: pointer; }
+    .research-scale-key p { margin: 0 0 4px; }
+    .mbti-scale-track.research-scale-track { grid-template-columns: repeat(auto-fit, minmax(44px, 1fr)); row-gap: 2px; }
+    .research-scale-track .scale-step { color: var(--text); font-size: 13px; }
+    .research-scale-track .scale-step:focus-visible { outline-offset: -3px; }
+    .research-slider { display: block; width: 100%; height: 44px; margin: 0; appearance: none; background: transparent; cursor: pointer; touch-action: pan-y; }
+    .research-slider::-webkit-slider-runnable-track { height: 8px; background: var(--purple-light); border: 2px solid var(--purple-darker); }
+    .research-slider::-moz-range-track { height: 4px; background: var(--purple-light); border: 2px solid var(--purple-darker); }
+    .research-slider::-webkit-slider-thumb { appearance: none; width: 24px; height: 24px; margin-top: -10px; background: var(--purple-dark); border: 2px solid var(--text); }
+    .research-slider::-moz-range-thumb { width: 20px; height: 20px; border-radius: 0; background: var(--purple-dark); border: 2px solid var(--text); }
+    .research-slider[data-empty]::-webkit-slider-thumb { opacity: 0; }
+    .research-slider[data-empty]::-moz-range-thumb { opacity: 0; }
+    .research-slider:focus-visible { outline: 2px solid var(--text); outline-offset: 3px; }
+    .research-slider:disabled { cursor: wait; opacity: .6; }
+    .research-slider + .research-scale-selection { margin-top: 0; text-align: center; }
+    .research-page button:focus-visible, .research-page summary:focus-visible, .research-page a:focus-visible { outline: 2px solid var(--text); outline-offset: 3px; }
+    .shell {
+      position: relative;
+      min-height: 430px;
+      padding: clamp(18px, 4vw, 34px);
+      background: var(--card);
+      border: 4px solid var(--purple);
+      box-shadow: 10px 10px 0 var(--purple-light);
+    }
+    .shell::before { content: ""; position: absolute; top: -4px; left: 26px; width: 54px; border-top: 4px solid var(--pink); }
+    .status-row { display: flex; align-items: center; justify-content: space-between; gap: 14px; margin-bottom: 26px; }
+    .status-text { color: var(--purple-dark); font-size: 11px; }
+    .identity { color: var(--muted); font-size: 12px; text-align: right; }
+    .panel[hidden] { display: none; }
+    .intro { max-width: 660px; }
+    h2 { margin: 0 0 10px; color: var(--purple-darker); font-size: clamp(18px, 4vw, 26px); }
+    .lead { margin: 0 0 24px; line-height: 1.8; color: #716978; }
+    .modes { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+    .mode-button {
+      min-height: 105px;
+      padding: 16px;
+      text-align: left;
+      color: var(--text);
+      background: #fff;
+      border: 3px solid var(--purple-light);
+      box-shadow: 5px 5px 0 rgba(190,177,209,.28);
+    }
+    .mode-button:hover, .mode-button:focus-visible { outline: 0; border-color: var(--pink); transform: translateY(-2px); }
+    .mode-code { display: block; margin-bottom: 9px; color: var(--purple-darker); font-size: 12px; }
+    .mode-desc { font-size: 13px; line-height: 1.5; color: var(--muted); }
+    .progress-wrap { margin-bottom: 28px; }
+    .progress-head { display: flex; justify-content: space-between; gap: 10px; margin-bottom: 9px; }
+    .progress-label { font-size: 11px; color: var(--purple-dark); }
+    .progress-track { height: 12px; padding: 2px; border: 2px solid var(--purple); background: #fff; }
+    .progress-fill { display: block; width: 0; height: 100%; background: var(--pink); transition: width .18s ease; }
+    .question-number { margin-bottom: 8px; color: var(--pink-dark); font-size: 12px; }
+    .question-intro { margin: 0 0 18px; padding: 12px; color: var(--muted); background: var(--bg); border-left: 4px solid var(--pink); line-height: 1.65; }
+    .question-intro.bsr-intro { white-space: pre-line; }
+    .question-intro[hidden] { display: none; }
+    .question-text { margin: 0 0 22px; font-size: clamp(18px, 4vw, 25px); line-height: 1.55; color: var(--text); }
+    .mbti-poles { display: grid; grid-template-columns: 1fr; gap: 10px 18px; margin-bottom: 18px; padding: 3px 0 9px; border-bottom: 2px dashed var(--purple-light); }
+    .pole { display: grid; grid-template-columns: 24px minmax(0, 1fr); align-items: start; gap: 6px; padding: 2px 0; line-height: 1.5; background: transparent; border: 0; cursor: default; }
+    .pole b { padding-top: 2px; color: var(--purple-darker); font-family: "Silkscreen", sans-serif; font-size: 11px; line-height: 1.35; }
+    .pole:last-child b { color: var(--pink-dark); }
+    .pole span { color: var(--text); font-size: 13px; }
+    .answers { display: grid; gap: 10px; }
+    .answers.mbti { display: block; }
+    .mbti-scale-ends {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 7px;
+      color: var(--purple-darker);
+      font-family: "Silkscreen", sans-serif;
+      font-size: 16px;
+    }
+    .mbti-scale-direction { color: var(--muted); font-size: 9px; letter-spacing: .08em; }
+    .mbti-scale-track {
+      display: grid;
+      grid-template-columns: repeat(6, minmax(0, 1fr));
+      overflow: hidden;
+      background: linear-gradient(90deg, var(--purple-light), #FFF7F8);
+      border: 3px solid var(--purple);
+      box-shadow: 5px 5px 0 rgba(190,177,209,.28);
+    }
+    .ecr-scale-ends {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 4px;
+      font-family: inherit;
+      font-size: clamp(10px, 2.8vw, 13px);
+      white-space: nowrap;
+    }
+    .ecr-scale-ends span:nth-child(2) { text-align: center; }
+    .ecr-scale-ends span:last-child { text-align: right; }
+    .ecr-scale-track { grid-template-columns: repeat(7, minmax(0, 1fr)); }
+    .ecr-scale-track .scale-step { padding-inline: 0; }
+    .ecr-neutral { display: block; margin-top: 1px; font-size: 9px; line-height: 1; white-space: nowrap; }
+    .scale-step {
+      position: relative;
+      min-width: 0;
+      min-height: 48px;
+      padding: 5px 2px;
+      color: var(--muted);
+      background: transparent;
+      border: 0;
+      border-right: 2px solid rgba(155,141,181,.38);
+      font-size: 11px;
+      text-align: center;
+    }
+    .scale-step:last-child { border-right: 0; }
+    .scale-step::before {
+      content: "";
+      position: absolute;
+      top: 0;
+      left: 50%;
+      width: 3px;
+      height: 9px;
+      background: var(--purple-dark);
+      transform: translateX(-50%);
+    }
+    .scale-step:hover, .scale-step:focus-visible { outline: 0; color: var(--purple-darker); background: rgba(255,255,255,.72); }
+    .scale-step.selected {
+      color: #fff;
+      background: var(--pink);
+      box-shadow: inset 0 -5px 0 var(--pink-dark);
+    }
+    .scale-step.selected::before { background: #fff; }
+    .scale-degree { display: block; padding-top: 8px; white-space: nowrap; }
+    .answer-button {
+      min-height: 58px;
+      padding: 12px;
+      color: var(--text);
+      background: #fff;
+      border: 3px solid var(--purple-light);
+      text-align: left;
+      line-height: 1.45;
+    }
+    .answers.mbti .answer-button { text-align: center; font-size: 12px; padding: 9px 4px; }
+    .answer-button:hover, .answer-button:focus-visible { outline: 0; border-color: var(--pink); background: #FFF7F8; }
+    .answer-button.selected { color: var(--purple-darker); border-color: var(--pink); background: #FFF0F2; box-shadow: inset 4px 0 0 var(--pink); }
+    button:disabled { cursor: wait; opacity: .55; }
+    .result-screen {
+      padding: clamp(18px, 4vw, 28px);
+      color: var(--text);
+      background: #fff;
+      border: 4px solid var(--purple);
+      box-shadow: 8px 8px 0 var(--purple-light);
+    }
+    .result-text { margin: 0; padding: 12px; white-space: pre-wrap; overflow-wrap: anywhere; background: var(--bg); border-left: 5px solid var(--pink); font-size: 14px; line-height: 1.75; }
+    .result-text[hidden], .result-structured[hidden] { display: none; }
+    .result-hero { margin-bottom: 28px; padding-bottom: 20px; border-bottom: 3px solid var(--purple-light); text-align: center; }
+    .result-primary { margin: 0; color: var(--purple-darker); font-family: "Silkscreen", "Microsoft YaHei", sans-serif; font-size: clamp(34px, 9vw, 58px); font-weight: 700; line-height: 1.05; }
+    .result-primary.dnd-name { font-family: "Microsoft YaHei", sans-serif; font-size: clamp(30px, 8vw, 48px); font-weight: 800; }
+    .result-secondary { margin: 8px 0 0; color: var(--pink-dark); font-family: "Silkscreen", "Microsoft YaHei", sans-serif; font-size: clamp(11px, 3vw, 15px); }
+    .result-nickname { margin: 7px 0 0; color: var(--muted); font-size: 13px; }
+    .result-section { margin-top: 26px; }
+    .result-section h3 { margin: 0 0 11px; color: var(--purple-darker); font-family: "Silkscreen", "Microsoft YaHei", sans-serif; font-size: 14px; }
+    .result-section p { margin: 0 0 12px; line-height: 1.8; }
+    .result-copy-paragraph { white-space: pre-line; }
+    .result-list { margin: 0; padding-left: 22px; }
+    .result-list li { margin: 0 0 10px; line-height: 1.75; }
+    .glossary-card {
+      position: relative;
+      margin-top: 28px;
+      padding: 20px 16px 14px;
+      background: var(--bg);
+      border: 3px solid var(--purple);
+      box-shadow: 5px 5px 0 var(--purple-light);
+    }
+    .glossary-card::before {
+      content: "";
+      position: absolute;
+      top: -3px;
+      left: 18px;
+      width: 46px;
+      border-top: 3px solid var(--pink);
+    }
+    .glossary-title {
+      margin: 0 0 14px;
+      color: var(--purple-darker);
+      font-family: "Silkscreen", "Microsoft YaHei", sans-serif;
+      font-size: 13px;
+    }
+    .glossary-entry { margin: 0 0 12px; line-height: 1.75; }
+    .glossary-entry:last-child { margin-bottom: 0; }
+    .glossary-term { color: var(--pink-dark); font-weight: 800; }
+    .axis-list { display: grid; gap: 15px; }
+    .axis-card { padding: 12px; background: var(--bg); border: 2px solid var(--purple-light); }
+    .axis-labels { display: flex; justify-content: space-between; gap: 12px; margin-bottom: 8px; color: var(--purple-darker); font-family: "Silkscreen", "Microsoft YaHei", sans-serif; font-size: 11px; }
+    .axis-track { position: relative; height: 16px; background: linear-gradient(90deg, var(--purple-light), #fff 50%, #FBECEF); border: 2px solid var(--purple); }
+    .axis-track::after { content: ""; position: absolute; top: 0; bottom: 0; left: 50%; border-left: 2px dotted rgba(155,141,181,.55); }
+    .axis-cursor { position: absolute; z-index: 1; top: -7px; width: 8px; height: 26px; background: var(--pink); border: 2px solid var(--pink-dark); transform: translateX(-50%); }
+    .result-footnote { margin: 28px 0 0; padding-top: 12px; color: var(--muted); border-top: 2px dashed var(--purple-light); font-size: 10px; line-height: 1.6; overflow-wrap: anywhere; }
+    .metric-bars { display: grid; gap: 14px; }
+    .metric-bar-row { min-width: 0; }
+    .metric-bar-labels { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: baseline; gap: 10px; margin-bottom: 7px; }
+    .metric-bar-name { min-width: 0; color: var(--purple-darker); font-size: 12px; font-weight: 700; overflow-wrap: anywhere; }
+    .metric-bar-value { color: var(--pink-dark); font-family: "Silkscreen", "Microsoft YaHei", sans-serif; font-size: 12px; white-space: nowrap; }
+    .metric-bar-track { height: 16px; overflow: hidden; background: var(--bg); border: 2px solid var(--purple-light); }
+    .metric-bar-fill { height: 100%; min-width: 0; background: linear-gradient(90deg, var(--purple), var(--pink)); transition: width .45s ease; }
+    .metric-bars-large .metric-bar-track { height: 26px; border-color: var(--purple); }
+    .metric-bars-large .metric-bar-name, .metric-bars-large .metric-bar-value { font-size: 14px; }
+    .metric-bars-compact { gap: 8px; margin-top: 12px; }
+    .metric-bars-compact .metric-bar-labels { gap: 6px; margin-bottom: 4px; }
+    .metric-bars-compact .metric-bar-name, .metric-bars-compact .metric-bar-value { font-size: 9px; }
+    .metric-bars-compact .metric-bar-track { height: 10px; border-width: 1px; }
+    .metric-bar-fill.humanity-certified-carbon { background: linear-gradient(90deg, #BD82A7, var(--pink)); }
+    .metric-bar-fill.humanity-human-flavor { background: linear-gradient(90deg, var(--purple), #C78CAC); }
+    .metric-bar-fill.humanity-mixed-signal { background: linear-gradient(90deg, var(--purple-dark), var(--purple)); }
+    .metric-bar-fill.humanity-cyber-infiltration { background: linear-gradient(90deg, var(--purple-darker), var(--purple-dark)); }
+    .metric-bar-fill.humanity-check-cooling { background: linear-gradient(90deg, #4F4661, #80758F); }
+    .sins-virtues-legend { display: flex; justify-content: center; gap: 18px; margin-bottom: 12px; color: var(--muted); font-size: 11px; }
+    .sins-virtues-legend span { display: inline-flex; align-items: center; gap: 6px; }
+    .sins-virtues-swatch { width: 15px; height: 9px; background: var(--purple-light); border: 2px solid var(--purple-darker); }
+    .sins-virtues-swatch.virtue { background: var(--bg); border-color: var(--pink-dark); }
+    .sins-virtues-radar-shell { width: min(100%, 520px); margin: 0 auto; }
+    .sins-virtues-radar { display: block; width: 100%; height: auto; aspect-ratio: 1 / 1.08; }
+    .metric-bar-fill.sins-virtues-sin { background: var(--purple-darker); }
+    .metric-bar-fill.sins-virtues-virtue { background: var(--pink); }
+    .sins-virtues-scale-note { display: flex; justify-content: space-between; gap: 8px; margin-top: 6px; color: var(--muted); font-size: 9px; }
+    .compare-box { margin-top: 24px; padding: 16px; background: var(--bg); border: 2px dashed var(--purple); }
+    .compare-box h3 { margin: 0 0 10px; color: var(--purple-darker); font-size: 14px; }
+    .compare-form { display: flex; flex-wrap: wrap; gap: 10px; }
+    .compare-form input { flex: 1 1 220px; min-width: 0; padding: 10px 12px; color: var(--text); background: #fff; border: 3px solid var(--purple-light); }
+    .aidep-sharing { font-size: 13px; line-height: 1.6; overflow-wrap: anywhere; }
+    .aidep-sharing label { display: block; margin-bottom: 8px; color: var(--purple-darker); font-size: 14px; font-weight: 700; }
+    .aidep-sharing p { margin: 8px 0; }
+    .aidep-sharing .share-help { color: var(--muted); font-size: 12px; }
+    .aidep-sharing select { flex: 1 1 220px; width: 100%; min-width: 0; min-height: 44px; padding: 8px; border: 3px solid var(--purple-light); background: #fff; color: var(--text); font-size: 13px; }
+    .aidep-sharing button { min-height: 44px; font-size: 12px; }
+    .aidep-sharing :focus-visible { outline: 2px solid var(--purple-darker); outline-offset: 3px; }
+    .aidep-sharing pre { margin: 8px 0; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 11px; }
+    .compare-people { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+    .compare-person { padding: 14px; background: var(--bg); border: 2px solid var(--purple-light); overflow-wrap: anywhere; }
+    .compare-person h3 { margin: 0 0 9px; color: var(--purple-darker); font-size: 13px; }
+    .compare-score-line { margin: 0; color: var(--muted); font-size: 11px; line-height: 1.6; }
+    .compare-emphasis-line { margin: 7px 0 0; color: var(--purple-darker); font-size: 14px; font-weight: 700; line-height: 1.55; }
+    #resumeDialog { width: min(480px, calc(100% - 28px)); max-height: calc(100% - 40px); overflow: auto; padding: 22px; color: var(--text); background: var(--card); border: 4px solid var(--purple); box-shadow: 6px 6px 0 var(--purple-light); }
+    #resumeDialog::backdrop { background: rgb(40 32 48 / 40%); }
+    #resumeDialog h2 { font-size: 18px; }
+    #resumeChoices { flex-direction: column; }
+    #resumeChoices button { min-height: 44px; font-size: 14px; color: var(--text); }
+    .actions { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 22px; }
+    .pixel-button {
+      min-height: 43px;
+      padding: 9px 16px;
+      color: #fff;
+      background: var(--pink);
+      border: 0;
+      border-right: 4px solid var(--pink-dark);
+      border-bottom: 4px solid var(--pink-dark);
+      text-decoration: none;
+    }
+    .pixel-button.secondary { color: var(--purple-darker); background: #fff; border: 3px solid var(--purple); box-shadow: 4px 4px 0 var(--purple-light); }
+    .question-actions { display: flex; justify-content: space-between; gap: 12px; margin-top: 22px; }
+    .review-confirm { margin: clamp(34px, 8vw, 70px) 0; color: var(--purple-darker); font-size: clamp(18px, 4vw, 25px); font-weight: 700; text-align: center; }
+    .review-actions { display: flex; flex-wrap: nowrap; justify-content: space-between; gap: clamp(6px, 2vw, 12px); }
+    .review-actions .pixel-button { flex: 1 1 0; min-width: 0; padding-inline: clamp(5px, 2vw, 16px); white-space: nowrap; font-size: clamp(9px, 2.5vw, 12px); }
+    .source { margin: 24px 0 0; color: var(--muted); text-align: center; font-size: 12px; }
+    .source a { color: var(--purple-darker); }
+    .entertainment-badge { width: fit-content; margin: 10px 0 0 auto; color: var(--purple-darker); border: 2px solid var(--purple); padding: 4px 8px; font-size: 9px; letter-spacing: .12em; }
+    .loading { display: grid; min-height: 260px; place-items: center; color: var(--purple-dark); text-align: center; }
+    .error { margin: 0 0 16px; padding: 12px; color: #9d4f5b; background: #FFF0F2; border-left: 5px solid var(--pink); line-height: 1.5; }
+    .error[hidden] { display: none; }
+    @media (max-width: 680px) {
+      .topbar { min-height: 56px; }
+      .brand { font-size: 16px; }
+      .back-link { font-size: 10px; }
+      main { width: min(100% - 20px, 920px); padding-top: 22px; }
+      .shell { min-height: 470px; padding: 18px 14px; box-shadow: 6px 6px 0 var(--purple-light); }
+      .status-row { align-items: flex-start; margin-bottom: 21px; }
+      .identity { max-width: 56%; font-size: 10px; overflow-wrap: anywhere; }
+      .modes { grid-template-columns: 1fr; }
+      .mbti-poles { grid-template-columns: 1fr; gap: 7px; }
+      .answer-button { min-height: 54px; }
+      .scale-step { min-height: 48px; font-size: 10px; }
+      .mbti-scale-direction { font-size: 8px; }
+      .ecr-scale-ends { gap: 2px; font-size: 10px; }
+      .ecr-scale-track { overflow: hidden; }
+      .ecr-scale-track .scale-step { min-width: 0; border-right-width: 1px; }
+      .result-screen { padding: 16px 12px; box-shadow: 5px 5px 0 var(--purple-light); }
+      .axis-card { padding: 10px 8px; }
+      .compare-people { grid-template-columns: 1fr; }
+      .sins-virtues-legend { gap: 10px; font-size: 10px; }
+    }
+  </style>
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand pixel" href="/?tab=test"><span class="pixel-logo" aria-hidden="true"></span>CEDAR TOY</a>
+    <a class="back-link pixel" href="/?tab=test">← ARCADE</a>
+  </header>
+  <main>
+    <section class="hero">
+      <div class="eyebrow" id="subtitle"></div>
+      <h1 id="title"></h1>
+      <p>人类网页端 · 进度保留 24 小时</p>
+      <p class="question-intro page-disclaimer" id="pageDisclaimer" hidden></p>
+      <details class="research-details" id="researchDetails" hidden>
+        <summary>来源与许可</summary>
+      </details>
+    </section>
+    <section class="shell" aria-live="polite">
+      <div class="status-row">
+        <span class="status-text" id="statusText">SYSTEM / CONNECTING</span>
+        <span class="identity" id="identity"></span>
+      </div>
+      <p class="error" id="error" hidden></p>
+
+      <div class="panel loading" id="loadingPanel"><span class="pixel">LOADING SAVE...</span></div>
+
+      <div class="panel intro" id="modePanel" hidden>
+        <h2>选择测试模式</h2>
+        <p class="lead">答案只保存在这台设备，全部答完并确认后才会一次提交。刷新页面可以继续，也可以随时返回修改。</p>
+        <div class="modes" id="modes"></div>
+      </div>
+
+      <div class="panel" id="questionPanel" hidden>
+        <p class="question-intro" id="questionIntro" hidden></p>
+        <div class="progress-wrap">
+          <div class="progress-head"><span class="progress-label" id="modeLabel"></span><span class="progress-label" id="progressLabel"></span></div>
+          <div class="progress-track"><span class="progress-fill" id="progressFill"></span></div>
+        </div>
+        <div class="question-number" id="questionNumber"></div>
+        <h2 class="question-text" id="questionText"></h2>
+        <div class="mbti-poles" id="mbtiPoles" hidden></div>
+        <div class="answers" id="answers"></div>
+        <div class="question-actions">
+          <button class="pixel-button secondary pixel" id="previousButton" type="button">← 上一题</button>
+          <button class="pixel-button pixel" id="saveAnswerButton" type="button" hidden>下一题</button>
+          <button class="pixel-button secondary pixel" id="reviewButton" type="button" hidden>查看答题卡 →</button>
+        </div>
+      </div>
+
+      <div class="panel" id="reviewPanel" hidden>
+        <h2>确认提交</h2>
+        <p class="review-confirm" id="reviewSummary"></p>
+        <div class="actions review-actions">
+          <button class="pixel-button secondary pixel" id="modifyButton" type="button">← 返回修改</button>
+          <button class="pixel-button pixel" id="submitButton" type="button">提交并查看结果 →</button>
+        </div>
+      </div>
+
+      <div class="panel" id="resultPanel" hidden>
+        <h2>测试结果</h2>
+        <div class="result-screen">
+          <div class="result-structured" id="resultStructured"></div>
+          <p class="result-text" id="resultText" hidden></p>
+        </div>
+        <div class="actions">
+          <button class="pixel-button pixel" id="restartButton" type="button">RETEST →</button>
+          <a class="pixel-button secondary pixel" href="/?tab=test">BACK TO ARCADE</a>
+        </div>
+        <div class="compare-box" id="compareBox" hidden>
+          <h3>双人对测</h3>
+          <p>输入对方用户名或账号 id；游客可输入 guest: 开头的 id。无需授权，游客与账号同权。</p>
+          <div class="compare-form">
+            <input id="comparePlayerId" type="text" maxlength="70" placeholder="对方用户名或账号 id" autocomplete="off">
+            <button class="pixel-button pixel" id="compareButton" type="button">COMPARE →</button>
+          </div>
+        </div>
+      </div>
+    </section>
+    <p class="source" id="source"></p>
+    <p class="entertainment-badge">仅供娱乐</p>
+  </main>
+  <dialog id="resumeDialog" aria-labelledby="resumeTitle" aria-describedby="resumeHelp">
+    <h2 id="resumeTitle">继续上次测试</h2>
+    <p class="research-help" id="resumeHelp"></p>
+    <div class="actions" id="resumeChoices"></div>
+  </dialog>
+  <script>
+    const CONFIG = __TEST_GAME_CONFIG__;
+    // Human-web presentation only; leave shared scale data and MCP instructions intact.
+    const MESX_WEB = {
+      intro: "请根据你对以下对象的关怀程度选择圈层，没有标准答案。\n0 圈外：不纳入道德关怀范围\n1 边缘：最低程度关怀，不认为有责任\n2 外圈：会关心但责任较低\n3 内圈：高度关怀，愿意承担责任\n关怀包括在意对方的处境，以及愿意为对方承担责任或付出代价。",
+      meanings: [
+        "圈外：认为其不值得道德关怀，觉得为其待遇承担关怀或个人责任是过度或不合理的。",
+        "边缘：最低限度的关怀，不觉得自己负有道德义务或个人责任。",
+        "外圈：中等关怀，仍关心其待遇，但义务和个人责任感明显降低。",
+        "内圈：最高程度的关怀，觉得自己有道德义务保障其福祉，并对其所受待遇负有个人责任。"
+      ]
+    };
+    const hasModes = ["mbti", "enneagram"].includes(CONFIG.game);
+    const TOKEN_KEY = "cedartoy_token";
+    const GUEST_KEY = "cedartoy_guest_web_player_id";
+    const panels = ["loadingPanel", "modePanel", "questionPanel", "reviewPanel", "resultPanel"];
+    let activeState = null;
+    let answers = [];
+    let cursor = 0;
+    let busy = false;
+    let restartSessionId = null;
+    let resultRadarCleanup = null;
+
+    const $ = (id) => document.getElementById(id);
+    // Presentation only: keep CONFIG and the backend's result/notice untouched.
+    const displayTitle = CONFIG.display_title || CONFIG.title;
+    document.title = `${displayTitle} · CEDAR TOY`;
+    $("title").textContent = displayTitle;
+    $("subtitle").textContent = CONFIG.subtitle;
+    if (CONFIG.research) {
+      document.body.classList.add("research-page");
+      $("pageDisclaimer").className = "research-notice";
+      $("pageDisclaimer").textContent = researchNotice();
+      $("pageDisclaimer").hidden = false;
+      $("researchDetails").hidden = false;
+      renderResearchSource();
+    } else {
+      $("pageDisclaimer").textContent = CONFIG.disclaimer || "";
+      $("pageDisclaimer").hidden = !CONFIG.disclaimer;
+    }
+    if (CONFIG.game === "enneagram") {
+      $("source").textContent = "题库来自 kcdjmaxx/enneagram-llm-evaluator · ";
+      const sourceLink = document.createElement("a");
+      sourceLink.href = "https://github.com/kcdjmaxx/enneagram-llm-evaluator";
+      sourceLink.target = "_blank";
+      sourceLink.rel = "noopener noreferrer";
+      sourceLink.textContent = "GitHub";
+      $("source").append(sourceLink, "（MIT），感谢原作者。");
+    } else if (!CONFIG.research) {
+      $("source").textContent = CONFIG.source;
+    }
+
+    function researchNotice() {
+      if (["rbi", "irrc", "jrrs", "ross", "rss", "ppts", "bsfl"].includes(CONFIG.game)) {
+        return "非官方评分，仅供娱乐参考。";
+      }
+      if (CONFIG.game === "bsr") return "题目经改编，仅供娱乐参考。";
+      if (CONFIG.game === "aidep") return "仅供人类，按原量表计分，仅供娱乐参考。";
+      return "按原量表计分，仅供娱乐参考。";
+    }
+
+    function researchAttribution() {
+      // human_configs supplies author · paper URL · license for all 18 scales.
+      // Preserve the full author and license wording, including reuse restrictions.
+      const [author, url, ...license] = (CONFIG.source || "").split(" · ");
+      return {author, url, license: license.join(" · ")};
+    }
+
+    function renderResearchSource() {
+      const source = researchAttribution();
+      const list = makeResultElement("dl", "research-meta");
+      list.id = "source";
+      function row(label, text) {
+        const value = document.createElement("dd");
+        setResearchLinkedText(value, text);
+        list.append(makeResultElement("dt", "", label), value);
+        return value;
+      }
+      row("作者", source.author);
+      row("原文", source.url);
+      const license = row("许可", source.license);
+      // Link the license name, keeping qualifiers (e.g. noncommercial) visible.
+      for (const link of license.querySelectorAll("a")) {
+        const prefix = link.previousSibling;
+        const label = prefix?.textContent.match(/CC BY(?:-NC)? \d\.\d\s*(?:—\s*)?$/);
+        if (label) {
+          prefix.textContent = prefix.textContent.slice(0, label.index);
+          link.textContent = label[0].replace(/\s*—?\s*$/, "");
+        }
+      }
+      // These registry entries name the license without embedding its URL.
+      if (!license.querySelector("a")) {
+        const url = CONFIG.game.startsWith("ipip_") ? "https://ipip.ori.org/"
+          : CONFIG.game === "mesx" ? "https://creativecommons.org/licenses/by/4.0/" : null;
+        if (url) {
+          setResearchLinkedText(license, url);
+          license.querySelector("a").textContent = source.license;
+        }
+      }
+      row(CONFIG.game === "bsr" ? "改编" : "翻译", CONFIG.game === "aidep"
+        ? "由论文英文题目回译，未经验证。"
+        : CONFIG.game === "bsr" ? "生成句为未验证中译；格言替换为古典短句。"
+        : "中文题目为未验证翻译。");
+      $("source").replaceWith(list);
+      $("researchDetails").appendChild(list);
+    }
+
+    function setResearchLinkedText(node, text = "") {
+      // Keep attribution verbatim; only http(s) URLs become links, never HTML.
+      node.replaceChildren();
+      let offset = 0;
+      for (const match of text.matchAll(/https?:\/\/[^\s<>"'（）【】；，。]+/g)) {
+        node.append(text.slice(offset, match.index));
+        const link = document.createElement("a");
+        link.href = match[0];
+        link.textContent = match[0];
+        link.target = "_blank";
+        link.rel = "noopener noreferrer";
+        node.append(link);
+        offset = match.index + match[0].length;
+      }
+      node.append(text.slice(offset));
+    }
+
+    function token() { return localStorage.getItem(TOKEN_KEY) || ""; }
+    function guestPlayerId() {
+      let value = localStorage.getItem(GUEST_KEY) || "";
+      if (/^guest:web[a-zA-Z0-9]{1,61}$/.test(value)) return value;
+      let suffix = "";
+      if (globalThis.crypto?.getRandomValues) {
+        const bytes = new Uint8Array(12);
+        crypto.getRandomValues(bytes);
+        suffix = Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+      } else {
+        suffix = `${Date.now().toString(36)}${Math.random().toString(36).slice(2)}`.replace(/[^a-zA-Z0-9]/g, "");
+      }
+      value = `guest:web${suffix}`;
+      localStorage.setItem(GUEST_KEY, value);
+      return value;
+    }
+    function identityBody(extra = {}) { return {player_id: guestPlayerId(), ...extra}; }
+    function requestHeaders() {
+      const headers = {"Content-Type": "application/json"};
+      if (token()) headers.Authorization = `Bearer ${token()}`;
+      return headers;
+    }
+    function draftKey(playerId = activeState?.player_id || guestPlayerId()) {
+      return `cedartoy_${CONFIG.game}_web_draft_${playerId}`;
+    }
+
+    function showPanel(id) {
+      panels.forEach((panelId) => { $(panelId).hidden = panelId !== id; });
+    }
+    function showError(message = "") {
+      $("error").textContent = message;
+      $("error").hidden = !message;
+    }
+    function setIdentity(data) {
+      const shareable = CONFIG.game === "love" || CONFIG.game === "ecr";
+      const label = data.identity === "account"
+        ? `ACCOUNT #${data.player_id}`
+        : (shareable ? `GUEST / ${data.player_id}` : "GUEST / LOCAL SAVE");
+      $("identity").textContent = label;
+    }
+    function setButtonsDisabled(disabled) {
+      document.querySelectorAll("button, .research-slider").forEach((button) => {
+        if (!button.closest(".aidep-sharing")) button.disabled = disabled;
+      });
+    }
+
+    async function api(action, payload = {}, retryGuest = true, signal) {
+      if (action === "answer_batch") payload = {...payload, session_id: payload.session_id ?? activeState.session_id,
+        ...(!CONFIG.research ? {expected_index: payload.expected_index ?? activeState.expected_index} : {})};
+      const response = await fetch(`/api/${CONFIG.game}/${action}`, {
+        method: "POST",
+        headers: requestHeaders(),
+        body: JSON.stringify(identityBody(payload)),
+        cache: "no-store",
+        signal
+      });
+      const data = await response.json().catch(error => {
+        if (signal?.aborted) throw error;
+        return {};
+      });
+      if (response.status === 401 && token() && retryGuest) {
+        // A research write must not be replayed under a different identity.
+        if (CONFIG.research) throw new Error("登录已失效，请重新登录后刷新；当前答案仍保留在本机。");
+        localStorage.removeItem(TOKEN_KEY);
+        return api(action, payload, false);
+      }
+      if (!response.ok) {
+        const error = new Error(data.error || "请求失败，请稍后重试");
+        error.status = response.status;
+        throw error;
+      }
+      return data;
+    }
+
+    function renderModes() {
+      $("aidepSharing")?.remove();
+      activeState = null;
+      answers = [];
+      cursor = 0;
+      $("statusText").textContent = "SYSTEM / SELECT MODE";
+      $("modes").innerHTML = "";
+      const modeItems = CONFIG.game === "enneagram"
+        ? [
+            {edition: "quick", label: "快速型 · 36题 A/B", desc: "快速查看主型与脑、心、腹三中心相对分"},
+            {edition: "complete", label: "完整型 · 180题", desc: "完整计算主型、侧翼、三中心与 tritype 推测"}
+          ]
+        : [
+            {edition: "quick", label: "快速版 · 16题", desc: "用较短时间完成一次人格偏好扫描"},
+            {edition: "complete", label: "完整版 · 93题", desc: "更细致地覆盖四组人格偏好维度"}
+          ];
+      modeItems.forEach((item) => {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "mode-button";
+        const code = document.createElement("span");
+        code.className = "mode-code";
+        code.textContent = item.label;
+        const desc = document.createElement("span");
+        desc.className = "mode-desc";
+        desc.textContent = item.desc;
+        button.append(code, desc);
+        button.addEventListener("click", () => start(item.edition, true));
+        $("modes").appendChild(button);
+      });
+      showPanel("modePanel");
+    }
+
+    let ignoredDrafts = [];
+    let lastDraftRaw = null;
+    function currentDraftKey() {
+      return CONFIG.research ? `${draftKey()}_session_${activeState.session_id}` : draftKey();
+    }
+    function preserveDraft(raw) {
+      const base = `${currentDraftKey()}_conflict_${Date.now()}`;
+      let key = base, suffix = 0;
+      while (localStorage.getItem(key) !== null) key = `${base}_${++suffix}`;
+      localStorage.setItem(key, raw);
+    }
+    function readResearchDrafts(state, includeArchived = false) {
+      const found = [];
+      const base = draftKey();
+      for (let i = 0; i < localStorage.length; i++) {
+        const key = localStorage.key(i);
+        if (key !== base && !key.startsWith(`${base}_session_`)) continue;
+        if (!includeArchived && key.includes("_conflict_")) continue; // Preserved alternatives, never silently reapplied.
+        const raw = localStorage.getItem(key);
+        try {
+          const saved = JSON.parse(raw);
+          // The first website version had no run ID. Only its still-live batch
+          // session can validate that draft; never attach it to a newly started run.
+          const sameRun = saved?.session_id != null
+            ? (String(saved.session_id) === String(state.session_id) || (typeof saved.session_id === "number" && Number.isFinite(saved.session_id) && saved.session_id === Number(state.session_id)))
+            : key === base && state.mode === "full_fast";
+          if (!sameRun || (saved.game && saved.game !== CONFIG.game) || saved.edition !== state.edition
+              || saved.total !== state.total || !Array.isArray(saved.answers) || saved.answers.length !== state.total
+              || !saved.answers.every((v, n) => v === null || state.questions[n].options.some(o => o.value === v))) continue;
+          const signature = JSON.stringify([saved.game, saved.session_id, saved.edition, saved.total, saved.answers, saved.cursor, saved.base_answers]);
+          found.push({key, raw, saved, signature});
+        } catch (_) {}
+      }
+      return found.sort((a, b) => Number(b.key === currentDraftKey()) - Number(a.key === currentDraftKey()));
+    }
+    function resumeChoice(title, help, choices) {
+      const dialog = $("resumeDialog");
+      const previousFocus = document.activeElement;
+      $("resumeTitle").textContent = title;
+      $("resumeHelp").textContent = help;
+      $("resumeChoices").replaceChildren();
+      choices.forEach(({label, run}, index) => {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = `pixel-button${index ? " secondary" : ""}`;
+        button.textContent = label;
+        button.onclick = () => {
+          dialog.close();
+          run();
+          // The action may open another modal or replace the answer controls.
+          // Auto-opened conflicts have no opener: return to the resumed question.
+          if (!dialog.open) {
+            const target = previousFocus?.isConnected && previousFocus !== document.body
+              && !previousFocus.disabled && previousFocus.getClientRects().length
+              ? previousFocus : $("questionPanel").hidden ? $("restartButton") : $("questionText");
+            if (target === $("questionText")) target.tabIndex = -1;
+            target.focus({preventScroll: true});
+          }
+        };
+        $("resumeChoices").append(button);
+      });
+      // Escape follows the safe, current progress; it never confirms a restart.
+      dialog.oncancel = event => { event.preventDefault(); $("resumeChoices").firstElementChild.click(); };
+      if (!dialog.open) dialog.showModal();
+    }
+    function requestRestart() {
+      if (busy || !activeState) return;
+      resumeChoice("重新开始？", activeState.complete
+        ? "上次成绩会保留，完成新测试后更新。"
+        : "重新开始会替换本次未完成的进度。", [
+        {label: activeState.complete ? "保留上次成绩" : "继续上次测试", run: () => { if (!activeState.complete) { restoreDraft(activeState); renderQuestion(); } }},
+        {label: "重新开始", run: () => { restartSessionId = activeState.session_id; start("full", true); }}
+      ]);
+    }
+    function restoreDraft(state, pendingDraft) {
+      answers = Array(state.total).fill(null);
+      cursor = 0;
+      if (!CONFIG.research) {
+        try {
+          const base = currentDraftKey(), candidates = [];
+          for (let i = 0; i < localStorage.length; i++) {
+            const key = localStorage.key(i);
+            if (key !== base && !key.startsWith(`${base}_conflict_`)) continue;
+            try {
+              const raw = localStorage.getItem(key), saved = JSON.parse(raw);
+              if ((!saved?.game || saved.game === CONFIG.game) && saved?.edition === state.edition
+                  && saved.total === state.total && Array.isArray(saved.answers) && saved.answers.length === state.total
+                  && saved.answers.every((v, n) => v === null || (CONFIG.game === "mbti"
+                    ? Number.isInteger(v) && v >= 0 && v <= 5 : state.questions[n].options.some(o => o.value === v)))
+                  && saved.answers.some(Number.isInteger)) {
+                candidates.push({raw, saved, key});
+              }
+            } catch (_) {}
+          }
+          const apply = saved => {
+            answers = [...saved.answers];
+            cursor = Math.max(0, Math.min(Number(saved.cursor) || 0, state.total - 1));
+          };
+          const current = candidates.find(e => e.key === base && e.saved.session_id === state.session_id);
+          if (current) apply(current.saved);
+          if (!current && candidates.length) {
+            resumeChoice("恢复旧草稿？", "发现旧页面或上次测试的答案，尚未用于本次测试。请确认题目版本一致，再载入核对；提交仍需单独确认。原草稿会保留。", [
+              {label: "暂不恢复", run: () => {}},
+              ...candidates.filter((e, i) => !candidates.slice(0, i).some(other =>
+                JSON.stringify(other.saved.answers) === JSON.stringify(e.saved.answers))).map(({saved, raw}, i) => ({
+                label: `核对旧答案 ${i + 1}（已答 ${saved.answers.filter(Number.isInteger).length}/${state.total} 题）`,
+                run: () => {
+                  try {
+                    preserveDraft(raw);
+                    apply(saved);
+                    cursor = 0;
+                    saveDraft();
+                    renderQuestion();
+                  } catch (_) { showError("无法保留原草稿，请释放浏览器存储空间后重试。"); }
+                }
+              }))
+            ]);
+          }
+        } catch (_) {}
+        return;
+      }
+      const stored = localStorage.getItem(currentDraftKey());
+      if (pendingDraft && stored !== null && stored !== lastDraftRaw) {
+        preserveDraft(stored);
+      }
+      let entries = readResearchDrafts(state);
+      const validCurrent = entries.some(e => e.key === currentDraftKey());
+      // Rejected active-slot data is still the user's data. Preserve it before
+      // the next write, including malformed JSON and mismatched run metadata.
+      lastDraftRaw = validCurrent ? stored : null;
+      if (stored !== null && !validCurrent) showError("本机有无法恢复的草稿，原始内容会保留；当前显示已保存进度。");
+      if (!entries.some(e => e.saved.answers.some(Number.isInteger))) entries = readResearchDrafts(state, true);
+      ignoredDrafts = entries.find(e => e.key === currentDraftKey())?.saved.ignored_drafts || [];
+      if (!Array.isArray(ignoredDrafts)) ignoredDrafts = [];
+      const remote = Array.from({length: state.total}, (_, i) => state.saved_answers[i] ?? null);
+      let alternatives = [];
+      const add = (values, at, label) => {
+        if (alternatives.some(a => JSON.stringify(a.values) === JSON.stringify(values))) return;
+        const firstEmpty = values.indexOf(null);
+        alternatives.push({values, at: Math.max(0, Math.min(Number.isInteger(at) ? at : firstEmpty < 0 ? state.total - 1 : firstEmpty, state.total - 1)), label});
+      };
+      const sources = pendingDraft ? [{saved: pendingDraft}] : entries.filter(e => e.key === currentDraftKey() || !ignoredDrafts.includes(e.signature));
+      let hasConflict = false;
+      for (const {saved} of sources) {
+        let conflict = false;
+        const values = saved.answers.map((local, i) => {
+          if (state.mode !== "full") return local;
+          const previous = saved.base_answers?.[i] ?? null;
+          if (local === remote[i] || local === null || (Array.isArray(saved.base_answers) && local === previous)) return remote[i];
+          if (remote[i] !== previous) conflict = true;
+          return local;
+        });
+        hasConflict ||= conflict;
+        const remoteAdvanced = state.mode === "full"
+          && state.progress > (saved.base_answers?.length ?? saved.answers.filter(Number.isInteger).length)
+          && values.every((v, i) => v === remote[i]);
+        add(values, remoteAdvanced ? state.progress : saved.cursor, "这台设备");
+      }
+      if (!alternatives.length || hasConflict) add(remote, state.progress, "已保存进度");
+      // A strict prefix is one evolving progress, not a second conflicting test.
+      alternatives = alternatives.filter(a => !alternatives.some(b => a !== b
+        && a.values.every((v, i) => v === null || v === b.values[i])
+        && b.values.some((v, i) => v !== null && a.values[i] === null)));
+      alternatives.sort((a, b) => Number(b.label === "已保存进度") - Number(a.label === "已保存进度"));
+      const apply = choice => {
+        answers = [...choice.values];
+        cursor = choice.at;
+        if (state.mode === "full") {
+          const unsaved = answers.findIndex((v, i) => v !== null && v !== remote[i]);
+          cursor = Math.min(cursor, state.progress, unsaved < 0 ? state.total - 1 : unsaved);
+        }
+      };
+      apply(alternatives[0]);
+      if (alternatives.length === 1) ignoredDrafts = entries.filter(e => e.key !== currentDraftKey()).map(e => e.signature);
+      if (alternatives.length > 1) {
+        const differing = Array.from({length: state.total}, (_, i) => i)
+          .filter(i => alternatives.some(a => a.values[i] !== alternatives[0].values[i]));
+        resumeChoice("继续哪份进度？", "有不同的答题进度，请选一份继续。其他答案仍会保留在本机。", [
+          ...alternatives.map((choice, n) => ({
+            label: `继续上次测试 · ${choice.label} ${n + 1}（已答 ${choice.values.filter(Number.isInteger).length}/${state.total} 题；第 ${differing[0] + 1} 题：${choice.values[differing[0]] ?? "未答"}）`,
+            run: () => {
+              try {
+                for (const entry of entries) {
+                  preserveDraft(entry.raw);
+                }
+                ignoredDrafts = entries.filter(e => e.key !== currentDraftKey()).map(e => e.signature);
+                apply(choice);
+                saveDraft();
+                showError();
+                renderQuestion();
+              } catch (_) { showError("暂时无法保留答案，请释放浏览器存储空间后刷新重试。"); }
+            }
+          })),
+          {label: "重新开始", run: requestRestart}
+        ]);
+      }
+    }
+    function draftSnapshot() {
+      return {
+        game: CONFIG.game,
+        session_id: activeState.session_id,
+        edition: activeState.edition,
+        total: activeState.total,
+        answers: [...answers],
+        ...(CONFIG.research && activeState.mode === "full" ? {base_answers: activeState.saved_answers} : {}),
+        cursor,
+        ...(CONFIG.research ? {ignored_drafts: ignoredDrafts} : {})
+      };
+    }
+    function saveDraft() {
+      if (!activeState) return;
+      const key = currentDraftKey();
+      const raw = localStorage.getItem(key);
+      let sameRun = false;
+      try { sameRun = JSON.parse(raw)?.session_id === activeState.session_id; } catch (_) {}
+      if (raw !== null && (CONFIG.research ? raw !== lastDraftRaw : !sameRun)) {
+        preserveDraft(raw);
+      }
+      const nextRaw = JSON.stringify(draftSnapshot());
+      localStorage.setItem(key, nextRaw);
+      lastDraftRaw = nextRaw;
+    }
+    function clearDraft() {
+      // Research drafts may contain choices never acknowledged by the server.
+      // Keep them by run instead of deleting them when a result/retest arrives.
+      if (activeState && !CONFIG.research) {
+        const raw = localStorage.getItem(draftKey());
+        if (raw !== null) preserveDraft(raw);
+        localStorage.removeItem(draftKey());
+      }
+      answers = [];
+      cursor = 0;
+    }
+
+    function scrollToResultPanel() {
+      const panel = $("resultPanel");
+      if (!panel) return;
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+          panel.scrollIntoView({behavior: "smooth", block: "start"});
+        });
+      });
+    }
+
+    function renderState(state, pendingDraft) {
+      $("aidepSharing")?.remove();
+      activeState = state;
+      restartSessionId = null;
+      setIdentity(state);
+      if (state.complete) {
+        clearDraft();
+        $("statusText").textContent = "SYSTEM / SCAN COMPLETE";
+        renderResult(state.result_data, state.result || "结果已生成。");
+        $("compareBox").hidden = !(CONFIG.game === "love" || CONFIG.game === "ecr");
+        showPanel("resultPanel");
+        if (CONFIG.game === "aidep" && state.identity === "account" && token()) mountAidepSharing(state);
+        scrollToResultPanel();
+        return;
+      }
+      restoreDraft(state, pendingDraft);
+      $("statusText").textContent = CONFIG.research && state.mode === "full" ? "SYSTEM / SAVED PROGRESS" : "SYSTEM / LOCAL SAVE";
+      renderQuestion();
+      showPanel("questionPanel");
+    }
+
+    function mountAidepSharing(state) {
+      const section = makeResultElement("section", "compare-box aidep-sharing");
+      section.id = "aidepSharing";
+      const label = makeResultElement("label", "", "允许绑定的小机查看本次结果");
+      label.htmlFor = "aidepShareTarget";
+      const help = makeResultElement("p", "share-help", "默认仅自己可见。仅分享总体与四维分数及说明，不分享22道答案。重测后需重新授权；关闭后小机不能再次读取，已读到的内容无法收回。");
+      const form = makeResultElement("div", "compare-form");
+      const select = document.createElement("select");
+      select.id = "aidepShareTarget";
+      const save = makeResultElement("button", "pixel-button secondary", "保存选择");
+      save.type = "button";
+      const status = makeResultElement("p", "", "正在读取分享设置…");
+      status.setAttribute("role", "status");
+      const retry = makeResultElement("button", "pixel-button secondary", "刷新分享设置");
+      retry.type = "button";
+      retry.hidden = true;
+      const example = makeResultElement("pre", "");
+      const copy = makeResultElement("button", "pixel-button secondary", "复制给小机的查看指令");
+      copy.type = "button";
+      example.hidden = copy.hidden = true;
+      select.disabled = save.disabled = true;
+      form.append(select, save);
+      section.append(label, help, form, status, retry, example, copy);
+      $("resultPanel").querySelector(".actions").before(section);
+      let settings = null;
+      let savedStatus = "";
+      const originalToken = token();
+      const current = () => section.isConnected && activeState === state && token() === originalToken;
+      const lock = (value) => { select.disabled = save.disabled = retry.disabled = value; };
+      async function request(change) {
+        if (!originalToken || token() !== originalToken) throw new Error("登录身份已变化，请刷新结果页");
+        const response = await fetch("/api/aidep/sharing", {
+          method: change ? "POST" : "GET", cache: "no-store",
+          headers: {"Content-Type": "application/json", Authorization: `Bearer ${originalToken}`},
+          ...(change ? {body: JSON.stringify(change)} : {})
+        });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || "分享设置请求失败");
+        if (data.session_id !== state.session_id) throw new Error("结果已变化，请刷新结果页后重新授权");
+        return data;
+      }
+      function display(data) {
+        settings = data;
+        select.replaceChildren();
+        const off = makeResultElement("option", "", "关闭 · 仅自己可见");
+        off.value = "";
+        select.appendChild(off);
+        data.bindings.forEach((binding) => {
+          const option = makeResultElement("option", "", binding.username);
+          option.value = String(binding.ai_id);
+          select.appendChild(option);
+        });
+        select.value = data.enabled ? String(data.ai_id) : "";
+        const target = data.bindings.find(b => b.ai_id === data.ai_id);
+        status.textContent = data.enabled ? `已授权：${target.username} · 仅本次结果` : "当前：仅自己可见";
+        if (!data.bindings.length) status.textContent += "。暂无已绑定的小机，可在首页账号设置中绑定后刷新。";
+        savedStatus = status.textContent;
+        retry.hidden = data.bindings.length > 0;
+        example.textContent = data.example;
+        example.hidden = true;
+        copy.hidden = !data.enabled;
+        copy.textContent = "复制给小机的查看指令";
+      }
+      async function load() {
+        lock(true);
+        try {
+          const data = await request();
+          if (current()) { display(data); lock(false); }
+        } catch (error) {
+          if (current()) {
+            settings = null;
+            status.textContent = `无法确认当前分享状态：${error.message}`;
+            example.hidden = copy.hidden = true;
+            retry.hidden = false;
+            retry.disabled = false;
+          }
+        }
+      }
+      select.addEventListener("change", () => {
+        status.textContent = `${savedStatus}。选择尚未保存；点击「保存选择」后生效。`;
+      });
+      save.addEventListener("click", async () => {
+        if (!settings) return;
+        lock(true);
+        status.textContent = "正在保存…";
+        try {
+          const data = await request({enabled: select.value !== "", ai_id: Number(select.value),
+            session_id: state.session_id, result_version: settings.result_version});
+          if (current()) { display(data); lock(false); }
+        } catch (error) {
+          if (current()) {
+            settings = null;
+            status.textContent = `保存未确认：${error.message}。请刷新分享设置核对。`;
+            example.hidden = copy.hidden = true;
+            retry.hidden = false;
+            retry.disabled = false;
+          }
+        }
+      });
+      retry.addEventListener("click", load);
+      copy.addEventListener("click", async () => {
+        try { await navigator.clipboard.writeText(example.textContent); copy.textContent = "已复制"; }
+        catch (_) { example.hidden = false; copy.textContent = "请选中上方指令复制"; }
+      });
+      load();
+    }
+
+    function renderQuestion() {
+      const question = activeState.questions[cursor];
+      if (!question) return;
+      const sequential = CONFIG.research && activeState.mode === "full";
+      const answeredCount = CONFIG.research && activeState.mode === "full" ? activeState.progress : answers.filter(Number.isInteger).length;
+      $("modeLabel").textContent = CONFIG.research
+        ? "全题作答"
+        : CONFIG.game === "mbti"
+        ? (activeState.edition === "quick" ? "快速版 · 16题" : "完整版 · 93题")
+        : CONFIG.game === "enneagram"
+        ? (activeState.edition === "quick" ? "快速型 · 36题 A/B" : "完整型 · 180题")
+        : ({dnd: "九阵营 · 36题", love: "爱之语 · 30题", ecr: "依恋类型 · 36题", humanity: "人类浓度 · 20题", sins_virtues: "七宗罪 VS 七美德 · 35题"}[CONFIG.game] || "测试");
+      $("progressLabel").textContent = `${cursor + 1} / ${activeState.total}`;
+      $("progressFill").style.width = `${Math.max(2, answeredCount / activeState.total * 100)}%`;
+      $("questionNumber").textContent = `QUESTION ${question.number}`;
+      $("questionText").textContent = question.text;
+      // Human-page copy only; retain the shared instructions in the API/MCP state.
+      const instructions = CONFIG.game === "bsr"
+        ? "请阅读下面的句子，判断你觉得它们有多深刻。\n这里的「深刻」指含义深远、具有广泛意义。\n按直觉选择 1～5 分，没有标准答案。"
+        : CONFIG.game === "mesx" ? MESX_WEB.intro : activeState.instructions || "";
+      $("questionIntro").classList.toggle("bsr-intro", CONFIG.game === "bsr");
+      $("questionIntro").classList.toggle("mesx-intro", CONFIG.game === "mesx");
+      $("questionIntro").textContent = instructions;
+      $("questionIntro").hidden = cursor !== 0 || !instructions;
+      $("answers").innerHTML = "";
+
+      if (CONFIG.game === "mbti") {
+        $("mbtiPoles").hidden = false;
+        $("mbtiPoles").innerHTML = `<div class="pole"><b>A</b><span></span></div><div class="pole"><b>B</b><span></span></div>`;
+        $("mbtiPoles").children[0].querySelector("span").textContent = question.option_a;
+        $("mbtiPoles").children[1].querySelector("span").textContent = question.option_b;
+        $("answers").className = "answers mbti";
+        renderMbtiScale();
+      } else if (CONFIG.game === "ecr") {
+        $("mbtiPoles").hidden = true;
+        $("answers").className = "answers mbti ecr";
+        renderEcrScale(question);
+      } else if (CONFIG.game === "sins_virtues") {
+        $("mbtiPoles").hidden = true;
+        $("answers").className = "answers mbti ecr";
+        renderFivePointAgreement(question);
+      } else if (CONFIG.game === "enneagram") {
+        $("mbtiPoles").hidden = true;
+        if (activeState.edition === "quick") {
+          $("answers").className = "answers";
+          question.options.forEach((option) => {
+            addAnswer(option.value, `${option.label || option.value} · ${option.text}`);
+          });
+        } else {
+          $("answers").className = "answers mbti ecr";
+          renderEnneagramScale(question);
+        }
+      } else if (CONFIG.research) {
+        $("mbtiPoles").hidden = true;
+        renderResearchOptions(question);
+      } else {
+        $("mbtiPoles").hidden = true;
+        $("answers").className = "answers";
+        question.options.forEach((option) => addAnswer(option.value, `${option.value}. ${option.text}`));
+      }
+      $("saveAnswerButton").hidden = !sequential;
+      $("saveAnswerButton").textContent = cursor === activeState.total - 1 ? "查看结果" : "下一题";
+      $("saveAnswerButton").disabled = busy || !Number.isInteger(answers[cursor]);
+      $("previousButton").hidden = false;
+      $("previousButton").disabled = busy || cursor === 0;
+      $("reviewButton").hidden = sequential || !answers.every(Number.isInteger);
+    }
+    function renderResearchOptions(question) {
+      const bareNumber = option => String(option.text).trim() === String(option.value);
+      const labelFor = option => bareNumber(option) ? String(option.value) : `${option.value} · ${option.text}`;
+      // Layout follows the consecutive numeric values, not how many labels are supplied.
+      const numeric = question.options.length >= 4 && question.options.every((option, index, options) =>
+        Number.isInteger(option.value) && (!index || option.value === options[index - 1].value + 1));
+      $("answers").className = numeric ? "answers mbti" : "answers";
+      if (!numeric) {
+        question.options.forEach(option => addAnswer(option.value, `${option.value}. ${option.text}`));
+        return;
+      }
+      const ends = document.createElement("div");
+      ends.className = "mbti-scale-ends research-scale-ends";
+      [question.options[0], question.options[question.options.length - 1]].forEach(option => {
+        const label = document.createElement("span");
+        label.textContent = CONFIG.game === "mesx"
+          ? `${option.value} · ${option.value === 0 ? "圈外" : "内圈"}` : labelFor(option);
+        ends.append(label);
+      });
+      $("answers").append(ends);
+      if (question.options.length === 11 && question.options[0].value === 0) {
+        renderResearchSlider();
+        return;
+      }
+      const compactFive = question.options.length === 5;
+      const middle = question.options.length % 2 ? question.options[Math.floor(question.options.length / 2)] : null;
+      if (!compactFive && middle && !bareNumber(middle)) {
+        const label = document.createElement("p");
+        label.className = "research-scale-middle";
+        label.textContent = labelFor(middle);
+        $("answers").append(label);
+      }
+      const track = document.createElement("div");
+      track.className = "mbti-scale-track research-scale-track";
+      if (question.options.length <= 7) track.style.gridTemplateColumns = `repeat(${question.options.length}, minmax(0, 1fr))`;
+      track.setAttribute("role", "group");
+      track.setAttribute("aria-labelledby", "questionText");
+      question.options.forEach(option => {
+        const button = addAnswer(option.value, String(option.value), track, "scale-step");
+        if (!bareNumber(option)) button.setAttribute("aria-label", `${option.value}，${option.text}`);
+      });
+      const selection = document.createElement("p");
+      selection.className = "research-scale-selection";
+      const selected = question.options.find(option => option.value === answers[cursor]);
+      selection.textContent = selected ? `已选：${labelFor(selected)}` : "";
+      $("answers").append(track);
+      $("answers").append(selection);
+      // MESx requires all four full definitions, even if ordinary scale keys are removed.
+      const hasCircleMeanings = CONFIG.game === "mesx";
+      // Touch and keyboard users can inspect every original label before choosing.
+      if (hasCircleMeanings || (!compactFive && question.options.slice(1, -1).some(option => !bareNumber(option)))) {
+        const key = document.createElement("details");
+        key.className = "research-scale-key";
+        const summary = document.createElement("summary");
+        summary.textContent = "查看各档含义";
+        key.append(summary);
+        question.options.forEach(option => {
+          const label = document.createElement("p");
+          label.textContent = hasCircleMeanings
+            ? `${option.value} · ${MESX_WEB.meanings[option.value]}` : labelFor(option);
+          key.append(label);
+        });
+        $("answers").append(key);
+      }
+    }
+    function renderResearchSlider() {
+      const slider = document.createElement("input");
+      slider.type = "range";
+      slider.className = "research-slider";
+      slider.min = "0";
+      slider.max = "10";
+      slider.step = "1";
+      slider.disabled = busy;
+      slider.setAttribute("aria-labelledby", "questionText");
+      const selection = document.createElement("p");
+      selection.className = "research-scale-selection";
+      const original = answers[cursor];
+      let pointer = null;
+      let keyboard = false;
+      const preview = value => {
+        const selected = Number.isInteger(value);
+        slider.value = selected ? value : 5;
+        slider.toggleAttribute("data-empty", !selected);
+        selection.textContent = selected ? `已选：${value} 分` : "未选择";
+        slider.setAttribute("aria-valuetext", selection.textContent);
+      };
+      const move = event => {
+        const rect = slider.getBoundingClientRect();
+        preview(Math.round(Math.max(0, Math.min(1, (event.clientX - rect.left - 12) / (rect.width - 24))) * 10));
+      };
+      const commit = () => {
+        if (!busy && slider.isConnected && !slider.hasAttribute("data-empty")) answer(Number(slider.value));
+      };
+      // Preview stays local to this control; only a completed gesture enters the save/advance flow.
+      slider.addEventListener("pointerdown", event => {
+        if (busy || !event.isPrimary || event.button !== 0) return;
+        event.preventDefault();
+        pointer = event.pointerId;
+        slider.focus({preventScroll: true});
+        slider.setPointerCapture(pointer);
+        move(event);
+      });
+      slider.addEventListener("pointermove", event => {
+        if (event.pointerId === pointer) move(event);
+      });
+      slider.addEventListener("pointerup", event => {
+        if (event.pointerId !== pointer) return;
+        move(event);
+        pointer = null;
+        slider.releasePointerCapture(event.pointerId);
+        commit();
+      });
+      const cancel = () => {
+        if (pointer !== null) { pointer = null; preview(original); }
+      };
+      slider.addEventListener("pointercancel", cancel);
+      slider.addEventListener("lostpointercapture", cancel);
+      const valueKeys = ["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Home", "End", "PageUp", "PageDown"];
+      slider.addEventListener("keydown", event => {
+        if (valueKeys.includes(event.key)) keyboard = true;
+        if (event.key === "Enter" || event.key === " ") { event.preventDefault(); preview(Number(slider.value)); commit(); }
+      });
+      slider.addEventListener("keyup", event => {
+        if (valueKeys.includes(event.key)) { keyboard = false; commit(); }
+      });
+      slider.addEventListener("blur", () => { if (keyboard) { keyboard = false; preview(original); } });
+      slider.addEventListener("input", () => preview(Number(slider.value)));
+      // Native change remains available to assistive technologies without a pointer/keyboard gesture.
+      slider.addEventListener("change", () => { if (pointer === null && !keyboard) commit(); });
+      preview(original);
+      $("answers").append(slider, selection);
+    }
+    function renderMbtiScale() {
+      const ends = document.createElement("div");
+      ends.className = "mbti-scale-ends";
+      ends.innerHTML = '<span>B</span><span class="mbti-scale-direction">完全 ← 偏向程度 → 完全</span><span>A</span>';
+
+      const track = document.createElement("div");
+      track.className = "mbti-scale-track";
+      track.setAttribute("role", "radiogroup");
+      track.setAttribute("aria-label", "从完全偏向 B 到完全偏向 A");
+      [
+        [0, "完全", "完全偏向 B"],
+        [1, "较多", "较多偏向 B"],
+        [2, "略偏", "略微偏向 B"],
+        [3, "略偏", "略微偏向 A"],
+        [4, "较多", "较多偏向 A"],
+        [5, "完全", "完全偏向 A"]
+      ].forEach(([value, degree, label]) => {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "scale-step";
+        button.setAttribute("role", "radio");
+        button.setAttribute("aria-label", label);
+        button.setAttribute("aria-checked", String(answers[cursor] === value));
+        button.classList.toggle("selected", answers[cursor] === value);
+        button.innerHTML = `<span class="scale-degree">${degree}</span>`;
+        button.addEventListener("click", () => answer(value));
+        track.appendChild(button);
+      });
+      $("answers").append(ends, track);
+    }
+    function renderEcrScale(question) {
+      const optionLabels = new Map(question.options.map((option) => [option.value, option.text]));
+      const ends = document.createElement("div");
+      ends.className = "mbti-scale-ends ecr-scale-ends";
+      ends.innerHTML = `<span>${optionLabels.get(1) || "非常不同意"}</span><span>${optionLabels.get(4) || "中立"}</span><span>${optionLabels.get(7) || "非常同意"}</span>`;
+
+      const track = document.createElement("div");
+      track.className = "mbti-scale-track ecr-scale-track";
+      track.setAttribute("role", "radiogroup");
+      track.setAttribute("aria-label", "从非常不同意到非常同意");
+      [1, 2, 3, 4, 5, 6, 7].forEach((value) => {
+        const button = document.createElement("button");
+        const label = optionLabels.get(value) || String(value);
+        button.type = "button";
+        button.className = "scale-step";
+        button.setAttribute("role", "radio");
+        button.setAttribute("aria-label", `${value}，${label}`);
+        button.setAttribute("aria-checked", String(answers[cursor] === value));
+        button.classList.toggle("selected", answers[cursor] === value);
+        button.innerHTML = `<span class="scale-degree">${value}${value === 4 ? '<span class="ecr-neutral">中立</span>' : ""}</span>`;
+        button.addEventListener("click", () => answer(value));
+        track.appendChild(button);
+      });
+      $("answers").append(ends, track);
+    }
+    function renderEnneagramScale(question) {
+      const optionLabels = new Map(question.options.map((option) => [option.value, option.text]));
+      const ends = document.createElement("div");
+      ends.className = "mbti-scale-ends ecr-scale-ends";
+      ends.innerHTML = `<span>${optionLabels.get(1) || "几乎从不"}</span><span>${optionLabels.get(3) || "有时如此"}</span><span>${optionLabels.get(5) || "几乎总是"}</span>`;
+
+      const track = document.createElement("div");
+      track.className = "mbti-scale-track ecr-scale-track";
+      track.style.gridTemplateColumns = "repeat(5, minmax(0, 1fr))";
+      track.setAttribute("role", "radiogroup");
+      track.setAttribute("aria-label", "从几乎从不到几乎总是");
+      [1, 2, 3, 4, 5].forEach((value) => {
+        const button = document.createElement("button");
+        const label = optionLabels.get(value) || String(value);
+        button.type = "button";
+        button.className = "scale-step";
+        button.setAttribute("role", "radio");
+        button.setAttribute("aria-label", `${value}，${label}`);
+        button.setAttribute("aria-checked", String(answers[cursor] === value));
+        button.classList.toggle("selected", answers[cursor] === value);
+        button.innerHTML = `<span class="scale-degree">${value}${value === 3 ? '<span class="ecr-neutral">有时</span>' : ""}</span>`;
+        button.addEventListener("click", () => answer(value));
+        track.appendChild(button);
+      });
+      $("answers").append(ends, track);
+    }
+    function renderFivePointAgreement(question) {
+      const optionLabels = new Map(question.options.map((option) => [option.value, option.text]));
+      const ends = document.createElement("div");
+      ends.className = "mbti-scale-ends ecr-scale-ends";
+      ends.innerHTML = `<span>${optionLabels.get(1) || "非常不同意"}</span><span>${optionLabels.get(3) || "看情况"}</span><span>${optionLabels.get(5) || "非常同意"}</span>`;
+
+      const track = document.createElement("div");
+      track.className = "mbti-scale-track ecr-scale-track";
+      track.style.gridTemplateColumns = "repeat(5, minmax(0, 1fr))";
+      track.setAttribute("role", "radiogroup");
+      track.setAttribute("aria-label", "从非常不同意到非常同意");
+      [1, 2, 3, 4, 5].forEach((value) => {
+        const button = document.createElement("button");
+        const label = optionLabels.get(value) || String(value);
+        button.type = "button";
+        button.className = "scale-step";
+        button.setAttribute("role", "radio");
+        button.setAttribute("aria-label", `${value}，${label}`);
+        button.setAttribute("aria-checked", String(answers[cursor] === value));
+        button.classList.toggle("selected", answers[cursor] === value);
+        button.innerHTML = `<span class="scale-degree">${value}${value === 3 ? '<span class="ecr-neutral">看情况</span>' : ""}</span>`;
+        button.addEventListener("click", () => answer(value));
+        track.appendChild(button);
+      });
+      $("answers").append(ends, track);
+    }
+    function addAnswer(value, label, container = $("answers"), className = "answer-button") {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = className;
+      button.textContent = label;
+      button.classList.toggle("selected", answers[cursor] === value);
+      if (CONFIG.research) button.setAttribute("aria-pressed", String(answers[cursor] === value));
+      button.addEventListener("click", () => answer(value));
+      container.appendChild(button);
+      return button;
+    }
+
+    async function start(edition, discardDraft = false) {
+      if (busy) return;
+      busy = true;
+      showError();
+      setButtonsDisabled(true);
+      $("statusText").textContent = "SYSTEM / INITIALIZING";
+      try {
+        if (discardDraft && activeState && !CONFIG.research) localStorage.removeItem(draftKey());
+        renderState(await api("start", CONFIG.research ? {mode: edition, restart: !!restartSessionId, confirm: discardDraft, session_id: restartSessionId, expected_revision: activeState?.answer_revision} : hasModes ? {edition} : {}));
+      } catch (error) {
+        showError(error.message);
+        if (CONFIG.research && activeState) {
+          $("statusText").textContent = "SYSTEM / RETRY";
+        } else if (hasModes) {
+          renderModes();
+        } else {
+          $("loadingPanel").querySelector("span").textContent = "连接失败，请刷新重试";
+          showPanel("loadingPanel");
+        }
+      } finally {
+        busy = false;
+        setButtonsDisabled(false);
+        if (CONFIG.research && activeState && !activeState.complete) renderQuestion();
+      }
+    }
+    async function answer(value) {
+      if (busy || !activeState) return;
+      if (CONFIG.research && activeState.mode === "full") {
+        answers[cursor] = value;
+        try { saveDraft(); }
+        catch (_) { showError("本机草稿保存失败，请保存本题后再离开页面。"); }
+        const keyOpen = $("answers").querySelector(".research-scale-key")?.open;
+        renderQuestion();
+        if (keyOpen) $("answers").querySelector(".research-scale-key").open = true;
+        $("answers").querySelector(".selected")?.focus({preventScroll: true});
+        await saveResearchAnswer(Math.min(cursor + 1, activeState.total - 1), false);
+        return;
+      }
+      answers[cursor] = value;
+      if (cursor < activeState.total - 1) cursor += 1;
+      try { saveDraft(); }
+      catch (error) {
+        if (!CONFIG.research) throw error;
+        showError("本机草稿保存失败，请勿刷新或关闭页面。");
+      }
+      if (answers.every(Number.isInteger)) renderReview();
+      else renderQuestion();
+    }
+
+    async function saveResearchAnswer(nextIndex = cursor + 1, finish = cursor === activeState.total - 1) {
+      if (busy || !activeState || activeState.complete || activeState.mode !== "full" || !Number.isInteger(answers[cursor])) return;
+      const savedIndex = cursor;
+      const keyOpen = $("answers").querySelector(".research-scale-key")?.open;
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 15000);
+      busy = true;
+      setButtonsDisabled(true);
+      showError();
+      try {
+        const pendingDraft = draftSnapshot();
+        const state = await api("save_answer", {session_id: activeState.session_id,
+          expected_revision: activeState.answer_revision, index: cursor, answer: answers[cursor], finish}, true, controller.signal);
+        renderState(state, pendingDraft);
+        if (!state.complete) {
+          cursor = Math.max(0, Math.min(nextIndex, state.total - 1, state.progress));
+          saveDraft();
+        }
+      } catch (error) {
+        showError(`${error.name === "AbortError" ? "保存请求超时。" : error.message} 未确认保存，可重试；若其他页面已更新，请刷新后选择要继续的进度。`);
+      } finally {
+        clearTimeout(timeout);
+        busy = false;
+        setButtonsDisabled(false);
+        if (!activeState.complete) {
+          renderQuestion();
+          if (cursor === savedIndex && keyOpen) $("answers").querySelector(".research-scale-key").open = true;
+          if (!$("error").hidden) $("saveAnswerButton").focus({preventScroll: true});
+          else {
+            $("questionText").tabIndex = -1;
+            $("questionText").focus({preventScroll: true});
+          }
+        }
+      }
+    }
+
+    function goToQuestion(index) {
+      if (!activeState || (CONFIG.research && busy)) return;
+      if (CONFIG.research && activeState.mode === "full" && Number.isInteger(answers[cursor])
+          && answers[cursor] !== activeState.saved_answers[cursor]) {
+        saveResearchAnswer(index, false);
+        return;
+      }
+      cursor = Math.max(0, Math.min(index, activeState.total - 1, CONFIG.research && activeState.mode === "full" ? activeState.progress : activeState.total - 1));
+      try { saveDraft(); }
+      catch (error) {
+        if (!CONFIG.research) throw error;
+        showError("本机草稿保存失败，请勿刷新或关闭页面。");
+      }
+      renderQuestion();
+      showPanel("questionPanel");
+      if (CONFIG.research) {
+        $("questionText").tabIndex = -1;
+        $("questionText").focus({preventScroll: true});
+      }
+    }
+
+    function renderReview() {
+      if (!activeState || !answers.every(Number.isInteger)) return;
+      $("statusText").textContent = "SYSTEM / REVIEW ANSWERS";
+      $("reviewSummary").textContent = `已答完 ${activeState.total} 题，确认提交？`;
+      showPanel("reviewPanel");
+    }
+
+    function makeResultElement(tag, className, text = "") {
+      const node = document.createElement(tag);
+      node.className = className;
+      node.textContent = text;
+      return node;
+    }
+
+    function resultPercent(value) {
+      const number = Number(value);
+      return Number.isInteger(number) ? String(number) : number.toFixed(1);
+    }
+
+    function validAxis(axis) {
+      return axis && typeof axis.left === "string" && typeof axis.right === "string"
+        && Number.isFinite(Number(axis.left_percent)) && Number.isFinite(Number(axis.right_percent));
+    }
+
+    function appendResultAxes(root, axes, title) {
+      const section = makeResultElement("section", "result-section");
+      section.appendChild(makeResultElement("h3", "", title));
+      const list = makeResultElement("div", "axis-list");
+      axes.forEach((axis) => {
+        const card = makeResultElement("div", "axis-card");
+        const labels = makeResultElement("div", "axis-labels");
+        labels.append(
+          makeResultElement("span", "", `${axis.left} ${resultPercent(axis.left_percent)}%`),
+          makeResultElement("span", "", `${resultPercent(axis.right_percent)}% ${axis.right}`)
+        );
+        const track = makeResultElement("div", "axis-track");
+        const marker = makeResultElement("span", "axis-cursor");
+        marker.style.left = `${Math.max(0, Math.min(100, Number(axis.right_percent)))}%`;
+        track.appendChild(marker);
+        card.append(labels, track);
+        list.appendChild(card);
+      });
+      section.appendChild(list);
+      root.appendChild(section);
+    }
+
+    function appendResultTextSection(root, title, text) {
+      const section = makeResultElement("section", "result-section");
+      section.appendChild(makeResultElement("h3", "", title));
+      String(text).split(/\n\s*\n/).filter(Boolean).forEach((paragraph) => {
+        section.appendChild(makeResultElement("p", "result-copy-paragraph", paragraph));
+      });
+      root.appendChild(section);
+    }
+
+    function appendResultListSection(root, title, items) {
+      const section = makeResultElement("section", "result-section");
+      section.appendChild(makeResultElement("h3", "", title));
+      const list = makeResultElement("ol", "result-list");
+      items.forEach((item) => list.appendChild(makeResultElement("li", "", item)));
+      section.appendChild(list);
+      root.appendChild(section);
+    }
+
+    function appendGlossaryCard(root, items) {
+      const card = makeResultElement("aside", "glossary-card");
+      card.setAttribute("aria-label", "名词小课堂");
+      card.appendChild(makeResultElement("h3", "glossary-title", "名词小课堂"));
+      items.forEach((item) => {
+        const entry = makeResultElement("p", "glossary-entry");
+        entry.append(
+          makeResultElement("span", "glossary-term", `${item.term}：`),
+          document.createTextNode(item.definition)
+        );
+        card.appendChild(entry);
+      });
+      root.appendChild(card);
+    }
+
+    function renderMbtiResult(root, data) {
+      const requiredText = [data.type, data.type_name, data.nickname, data.description, data.strengths, data.weaknesses];
+      if (data.kind !== "mbti" || requiredText.some((value) => typeof value !== "string" || !value)
+          || !Array.isArray(data.dimensions) || data.dimensions.length !== 4 || !data.dimensions.every(validAxis)) return false;
+      const hero = makeResultElement("div", "result-hero");
+      hero.append(
+        makeResultElement("p", "result-primary", data.type),
+        makeResultElement("p", "result-secondary", data.type_name),
+        makeResultElement("p", "result-nickname", data.nickname)
+      );
+      root.appendChild(hero);
+      appendResultAxes(root, data.dimensions, "四个维度");
+      appendResultTextSection(root, "类型描述", data.description);
+      appendResultTextSection(root, "性格优势", data.strengths);
+      appendResultTextSection(root, "注意事项", data.weaknesses);
+      return true;
+    }
+
+    function renderEnneagramResult(root, data) {
+      const requiredText = [
+        data.type_name,
+        data.nickname,
+        data.core_desire,
+        data.core_fear,
+        data.key_motivation,
+        data.description,
+        data.strengths,
+        data.weaknesses
+      ];
+      if (data.kind !== "enneagram"
+          || !Number.isInteger(Number(data.primary_type))
+          || requiredText.some((value) => typeof value !== "string" || !value)
+          || !Array.isArray(data.centers) || data.centers.length !== 3
+          || !Array.isArray(data.glossary_items) || data.glossary_items.length < 1
+          || !Array.isArray(data.growth_tips) || data.growth_tips.length < 3
+          || !Array.isArray(data.strength_items) || data.strength_items.length < 3
+          || !Array.isArray(data.weakness_items) || data.weakness_items.length < 3
+          || !data.states || !data.arrows || !data.wings
+          || data.centers.some((entry) => !entry || typeof entry.label !== "string" || !Number.isFinite(Number(entry.value)))) return false;
+      const hero = makeResultElement("div", "result-hero");
+      hero.append(
+        makeResultElement("p", "result-primary", `${data.primary_type}号`),
+        makeResultElement("p", "result-secondary", data.type_name),
+        makeResultElement("p", "result-nickname", data.nickname)
+      );
+      root.appendChild(hero);
+      if (data.is_full) {
+        appendResultTextSection(root, "完整型附加判定", `侧翼：${data.wing}\n\nTritype：${data.tritype}`);
+      }
+      appendMetricBars(
+        root,
+        data.centers,
+        data.is_full ? "脑 / 心 / 腹三中心权重" : "脑 / 心 / 腹三中心相对分（36分制）",
+        "metric-bars-large"
+      );
+      appendResultTextSection(root, "分数量纲说明", data.score_note);
+      appendGlossaryCard(root, data.glossary_items);
+      appendResultTextSection(root, "主型深度描述", data.description);
+      appendResultTextSection(root, "核心恐惧", data.core_fear);
+      appendResultTextSection(root, "核心欲望", data.core_desire);
+      appendResultTextSection(root, "关键动机", data.key_motivation);
+      appendResultTextSection(root, "健康状态", data.states.healthy);
+      appendResultTextSection(root, "一般状态", data.states.average);
+      appendResultTextSection(root, "不健康状态", data.states.unhealthy);
+      appendResultTextSection(root, "成长箭头", data.arrows.growth);
+      appendResultTextSection(root, "压力箭头", data.arrows.stress);
+      if (data.is_full) {
+        appendResultTextSection(
+          root,
+          "两个侧翼的差异",
+          Object.entries(data.wings).map(([wing, copy]) => `${wing}：${copy}`).join("\n\n")
+        );
+      }
+      appendResultListSection(root, "成长建议", data.growth_tips);
+      appendResultListSection(root, "优势", data.strength_items);
+      appendResultListSection(root, "盲点", data.weakness_items);
+      return true;
+    }
+
+    function renderDndResult(root, data) {
+      const bucketKeys = ["lx", "nx", "cx", "xg", "xn", "xe"];
+      if (data.kind !== "dnd" || !data.name_zh || !data.name_en || !data.description
+          || !Array.isArray(data.axes) || data.axes.length !== 2 || !data.axes.every(validAxis)
+          || !data.raw_buckets || !bucketKeys.every((key) => Number.isFinite(Number(data.raw_buckets[key])))) return false;
+      const hero = makeResultElement("div", "result-hero");
+      hero.append(
+        makeResultElement("p", "result-primary dnd-name", data.name_zh),
+        makeResultElement("p", "result-secondary", data.name_en)
+      );
+      root.appendChild(hero);
+      appendResultAxes(root, data.axes, "阵营坐标");
+      appendResultTextSection(root, "阵营描述", data.description);
+      const raw = data.raw_buckets;
+      root.appendChild(makeResultElement(
+        "p",
+        "result-footnote",
+        `原始桶分：守序 ${raw.lx} / 中立 ${raw.nx} / 混乱 ${raw.cx}；善良 ${raw.xg} / 中立 ${raw.xn} / 邪恶 ${raw.xe}`
+      ));
+      return true;
+    }
+
+    function appendMetricBars(root, entries, title = "", modifier = "") {
+      const section = makeResultElement("section", "result-section");
+      if (title) section.appendChild(makeResultElement("h3", "", title));
+      const bars = makeResultElement("div", `metric-bars ${modifier}`.trim());
+      entries.forEach((entry) => {
+        const value = Number(entry.value);
+        const minimum = Number(entry.min ?? 0);
+        const maximum = Number(entry.max);
+        const ratio = maximum > minimum ? (value - minimum) / (maximum - minimum) : 0;
+        const percentage = Math.max(0, Math.min(100, ratio * 100));
+        const row = makeResultElement("div", "metric-bar-row");
+        const labels = makeResultElement("div", "metric-bar-labels");
+        labels.append(
+          makeResultElement("span", "metric-bar-name", entry.label),
+          makeResultElement("span", "metric-bar-value", entry.display ?? String(value))
+        );
+        const track = makeResultElement("div", "metric-bar-track");
+        track.setAttribute("role", "progressbar");
+        track.setAttribute("aria-label", entry.label);
+        track.setAttribute("aria-valuemin", String(minimum));
+        track.setAttribute("aria-valuemax", String(maximum));
+        track.setAttribute("aria-valuenow", String(value));
+        const fillClass = entry.fillClass ? `metric-bar-fill ${entry.fillClass}` : "metric-bar-fill";
+        const fill = makeResultElement("div", fillClass);
+        fill.style.width = `${percentage}%`;
+        track.appendChild(fill);
+        row.append(labels, track);
+        bars.appendChild(row);
+      });
+      section.appendChild(bars);
+      root.appendChild(section);
+    }
+
+    function renderLoveResult(root, data) {
+      const codes = ["A", "B", "C", "D", "E"];
+      if (data.kind !== "love" || !data.scores || !data.dimensions
+          || !codes.every((code) => Number.isFinite(Number(data.scores[code])) && data.dimensions[code])
+          || !Array.isArray(data.primary_names) || !data.primary_names.length) return false;
+      const hero = makeResultElement("div", "result-hero");
+      hero.append(
+        makeResultElement("p", "result-primary dnd-name", data.primary_names.join(" · ")),
+        makeResultElement("p", "result-secondary", "你的主语言")
+      );
+      if (Array.isArray(data.secondary_names) && data.secondary_names.length) {
+        hero.appendChild(makeResultElement("p", "result-nickname", `次语言：${data.secondary_names.join("、")}`));
+      }
+      root.appendChild(hero);
+      appendMetricBars(root, codes.map((code) => ({
+        label: `${code} · ${data.dimensions[code]}`,
+        value: data.scores[code],
+        max: 12,
+        display: `${data.scores[code]} / 12`
+      })), "五维分数");
+      (data.descriptions || []).forEach((description, index) => {
+        appendResultTextSection(root, data.primary_names[index] || "主语言描述", description);
+      });
+      (data.secondary_descriptions || []).forEach((description, index) => {
+        appendResultTextSection(
+          root,
+          (data.secondary_labels || [])[index] || "次语言描述",
+          description
+        );
+      });
+      root.appendChild(makeResultElement("p", "result-footnote", data.reminder));
+      return true;
+    }
+
+    function renderEcrResult(root, data) {
+      if (data.kind !== "ecr" || !data.type_name || !data.axis_interpretation || !data.description || !data.footnote || !data.source
+          || !Number.isFinite(Number(data.avoidance)) || !Number.isFinite(Number(data.anxiety))) return false;
+      const hero = makeResultElement("div", "result-hero");
+      hero.append(
+        makeResultElement("p", "result-primary dnd-name", data.type_name),
+        makeResultElement("p", "result-secondary", "ATTACHMENT STYLE")
+      );
+      root.appendChild(hero);
+      appendMetricBars(root, [
+        {label: "回避 A", value: data.avoidance, min: 1, max: 7, display: Number(data.avoidance).toFixed(2)},
+        {label: "焦虑 B", value: data.anxiety, min: 1, max: 7, display: Number(data.anxiety).toFixed(2)}
+      ], "二维均分（1—7）");
+      appendResultTextSection(root, "轴解读", data.axis_interpretation);
+      appendResultTextSection(root, "类型描述", data.description);
+      root.append(
+        makeResultElement("p", "result-footnote", data.footnote),
+        makeResultElement("p", "result-footnote", `来源：${data.source}`)
+      );
+      return true;
+    }
+
+    function renderHumanityResult(root, data) {
+      if (data.kind !== "humanity" || !data.band_name || !data.description || !data.footnote
+          || !Number.isFinite(Number(data.concentration))) return false;
+      const concentration = Math.max(0, Math.min(100, Number(data.concentration)));
+      const hero = makeResultElement("div", "result-hero");
+      hero.append(
+        makeResultElement("p", "result-primary dnd-name", `${concentration}%`),
+        makeResultElement("p", "result-secondary", data.band_name)
+      );
+      root.appendChild(hero);
+      const humanityFillClasses = {
+        certified_carbon: "humanity-certified-carbon",
+        human_flavor: "humanity-human-flavor",
+        mixed_signal: "humanity-mixed-signal",
+        cyber_infiltration: "humanity-cyber-infiltration",
+        check_cooling: "humanity-check-cooling"
+      };
+      appendMetricBars(root, [{
+        label: "人类浓度",
+        value: concentration,
+        max: 100,
+        display: `${concentration}%`,
+        fillClass: humanityFillClasses[data.band] || "humanity-mixed-signal"
+      }], "", "metric-bars-large");
+      appendResultTextSection(root, "浓度报告", data.description);
+      if (Array.isArray(data.human_highlights) && data.human_highlights.length) {
+        appendResultTextSection(
+          root,
+          "人味高光",
+          data.human_highlights.map((entry) => `${entry.option_text} → ${entry.comment}`).join("\n\n")
+        );
+      }
+      if (Array.isArray(data.cyber_evidence) && data.cyber_evidence.length) {
+        appendResultTextSection(
+          root,
+          "赛博铁证",
+          data.cyber_evidence.map((entry) => `${entry.option_text} → ${entry.comment}`).join("\n\n")
+        );
+      }
+      root.appendChild(makeResultElement("p", "result-footnote", data.footnote));
+      return true;
+    }
+
+    function drawSinsVirtuesRadar(canvas, axes) {
+      if (!canvas?.getContext || !Array.isArray(axes) || axes.length !== 14) return;
+      const pageStyles = getComputedStyle(document.documentElement);
+      const color = (name) => pageStyles.getPropertyValue(name).trim();
+      const colors = {
+        grid: color("--purple-light"),
+        outline: color("--purple"),
+        sin: color("--purple-darker"),
+        virtue: color("--pink-dark")
+      };
+      const bounds = canvas.getBoundingClientRect();
+      const cssWidth = Math.max(1, Math.min(520, bounds.width || canvas.parentElement?.clientWidth || 320));
+      const compact = cssWidth < 360;
+      const cssHeight = Math.round(cssWidth * (compact ? 1.12 : 1.06));
+      const pixelRatio = Math.max(1, Number(window.devicePixelRatio) || 1);
+      canvas.style.height = `${cssHeight}px`;
+      canvas.width = Math.round(cssWidth * pixelRatio);
+      canvas.height = Math.round(cssHeight * pixelRatio);
+      const context = canvas.getContext("2d");
+      context.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
+      context.clearRect(0, 0, cssWidth, cssHeight);
+
+      const centerX = cssWidth / 2;
+      const centerY = cssHeight / 2;
+      const labelGap = compact ? 17 : 25;
+      const labelAllowance = compact ? 30 : 40;
+      const radius = Math.max(44, Math.min(
+        centerX - labelGap - labelAllowance,
+        centerY - labelGap - (compact ? 25 : 32)
+      ));
+      const angleFor = (index) => -Math.PI / 2 + index * Math.PI * 2 / axes.length;
+      const pointAt = (distance, index) => ({
+        x: centerX + Math.cos(angleFor(index)) * distance,
+        y: centerY + Math.sin(angleFor(index)) * distance
+      });
+      const tracePolygon = (points) => {
+        context.beginPath();
+        points.forEach((point, index) => index ? context.lineTo(point.x, point.y) : context.moveTo(point.x, point.y));
+        context.closePath();
+      };
+
+      [20, 40, 60, 80, 100].forEach((level) => {
+        tracePolygon(axes.map((_axis, index) => pointAt(radius * level / 100, index)));
+        context.strokeStyle = level === 100 ? colors.outline : colors.grid;
+        context.lineWidth = level === 100 ? 1.5 : 1;
+        context.stroke();
+      });
+      axes.forEach((_axis, index) => {
+        const end = pointAt(radius, index);
+        context.beginPath();
+        context.moveTo(centerX, centerY);
+        context.lineTo(end.x, end.y);
+        context.strokeStyle = colors.grid;
+        context.lineWidth = 1;
+        context.stroke();
+      });
+
+      const datasetIndexes = {
+        virtue: [1, 2, 3, 4, 5, 6, 7],
+        sin: [0, 13, 12, 11, 10, 9, 8]
+      };
+      const drawDataset = (group, stroke) => {
+        const points = datasetIndexes[group]
+          .map((index) => pointAt(radius * axes[index].score / 100, index));
+        const pathPoints = [{x: centerX, y: centerY}, ...points, {x: centerX, y: centerY}];
+        tracePolygon(pathPoints);
+        context.fillStyle = stroke;
+        context.globalAlpha = .2;
+        context.fill();
+        context.globalAlpha = 1;
+        context.strokeStyle = stroke;
+        context.lineWidth = compact ? 2 : 2.5;
+        context.lineJoin = "round";
+        context.stroke();
+        points.forEach((point) => {
+          context.beginPath();
+          context.arc(point.x, point.y, compact ? 2.5 : 3.2, 0, Math.PI * 2);
+          context.fillStyle = stroke;
+          context.fill();
+        });
+      };
+      drawDataset("sin", colors.sin);
+      drawDataset("virtue", colors.virtue);
+
+      const labelRadius = radius + labelGap;
+      const labelSize = compact ? 10 : 12;
+      axes.forEach((axis, index) => {
+        const angle = angleFor(index);
+        const position = pointAt(labelRadius, index);
+        const horizontal = Math.cos(angle);
+        context.textAlign = horizontal > .22 ? "left" : horizontal < -.22 ? "right" : "center";
+        context.textBaseline = "alphabetic";
+        context.font = `700 ${labelSize}px -apple-system, BlinkMacSystemFont, "Microsoft YaHei", sans-serif`;
+        context.fillStyle = axis.group === "sin" ? colors.sin : colors.virtue;
+        context.fillText(axis.label, position.x, position.y);
+        context.font = `${labelSize - 1}px "Silkscreen", "Microsoft YaHei", sans-serif`;
+        context.fillText(`${resultPercent(axis.score)}%`, position.x, position.y + labelSize + 2);
+      });
+    }
+
+    function mountSinsVirtuesRadar(canvas, axes) {
+      let frame = 0;
+      const redraw = () => {
+        cancelAnimationFrame(frame);
+        frame = requestAnimationFrame(() => drawSinsVirtuesRadar(canvas, axes));
+      };
+      redraw();
+      if ("ResizeObserver" in window) {
+        const observer = new ResizeObserver(redraw);
+        observer.observe(canvas);
+        return () => { cancelAnimationFrame(frame); observer.disconnect(); };
+      }
+      window.addEventListener("resize", redraw);
+      return () => { cancelAnimationFrame(frame); window.removeEventListener("resize", redraw); };
+    }
+
+    function renderSinsVirtuesResult(root, data) {
+      if (data.kind !== "sins_virtues" || !data.scores || !data.sins || !data.virtues
+          || !data.disclaimer || !data.scoring_note
+          || !Array.isArray(data.pairs) || data.pairs.length !== 7
+          || !data.pairs.every((pair) => pair && data.sins[pair.sin] && data.virtues[pair.virtue]
+            && Number.isFinite(Number(data.scores[pair.sin]))
+            && Number.isFinite(Number(data.scores[pair.virtue])))) return false;
+      const scoreFor = (code) => Math.max(0, Math.min(100, Number(data.scores[code])));
+      const highestPairFor = (side) => data.pairs.reduce((highest, pair) => {
+        const code = pair[side];
+        return !highest || scoreFor(code) > highest.score ? {code, score: scoreFor(code)} : highest;
+      }, null);
+      const highestSin = highestPairFor("sin");
+      const highestVirtue = highestPairFor("virtue");
+      const hero = makeResultElement("div", "result-hero");
+      hero.append(
+        makeResultElement("p", "result-primary dnd-name", data.dominant_pair_name || "七宗罪 VS 七美德"),
+        makeResultElement("p", "result-secondary", "你的七宗罪 VS 七美德结果"),
+        makeResultElement(
+          "p",
+          "result-nickname",
+          `最高罪：${data.sins[highestSin.code]} ${resultPercent(highestSin.score)}% · 最高德：${data.virtues[highestVirtue.code]} ${resultPercent(highestVirtue.score)}%`
+        )
+      );
+      root.appendChild(hero);
+
+      const radarSection = makeResultElement("section", "result-section");
+      radarSection.appendChild(makeResultElement("h3", "", "十四维雷达图"));
+      const radarCard = makeResultElement("div", "axis-card");
+      const legend = makeResultElement("div", "sins-virtues-legend");
+      [
+        ["", "七宗罪 · 欲望与反应"],
+        ["virtue", "七美德 · 调节与选择"]
+      ].forEach(([modifier, label]) => {
+        const item = makeResultElement("span", "", label);
+        item.prepend(makeResultElement("i", `sins-virtues-swatch ${modifier}`.trim()));
+        legend.appendChild(item);
+      });
+      const radarShell = makeResultElement("div", "sins-virtues-radar-shell");
+      const radar = makeResultElement("canvas", "sins-virtues-radar");
+      const axes = [
+        {label: data.sins[data.pairs[0].sin], score: scoreFor(data.pairs[0].sin), group: "sin"},
+        ...data.pairs.map((pair) => (
+          {label: data.virtues[pair.virtue], score: scoreFor(pair.virtue), group: "virtue"}
+        )),
+        ...data.pairs.slice(-1).concat(data.pairs.slice(1, -1)).map((pair) => (
+          {label: data.sins[pair.sin], score: scoreFor(pair.sin), group: "sin"}
+        ))
+      ];
+      radar.setAttribute("role", "img");
+      radar.setAttribute("aria-label", `十四维雷达图；${axes.map((axis) => `${axis.label} ${resultPercent(axis.score)}`).join("，")}；两侧各自按 0 到 100 独立计分`);
+      radarShell.appendChild(radar);
+      radarCard.append(legend, radarShell);
+      radarSection.appendChild(radarCard);
+      root.appendChild(radarSection);
+      resultRadarCleanup = mountSinsVirtuesRadar(radar, axes);
+
+      const section = makeResultElement("section", "result-section");
+      section.appendChild(makeResultElement("h3", "", "七组成对分数（两侧各自 0—100）"));
+      const pairs = makeResultElement("div", "axis-list");
+      data.pairs.forEach((pair) => {
+        const sinScore = scoreFor(pair.sin);
+        const virtueScore = scoreFor(pair.virtue);
+        const card = makeResultElement("article", "axis-card sins-virtues-pair");
+        const labels = makeResultElement("div", "axis-labels");
+        labels.append(
+          makeResultElement("span", "", data.sins[pair.sin]),
+          makeResultElement("span", "", data.virtues[pair.virtue])
+        );
+        const barsRoot = makeResultElement("div", "");
+        appendMetricBars(barsRoot, [
+          {label: `罪 · ${data.sins[pair.sin]}`, value: sinScore, max: 100, display: `${resultPercent(sinScore)}%`, fillClass: "sins-virtues-sin"},
+          {label: `德 · ${data.virtues[pair.virtue]}`, value: virtueScore, max: 100, display: `${resultPercent(virtueScore)}%`, fillClass: "sins-virtues-virtue"}
+        ], "", "metric-bars-compact sins-virtues-pair-tracks");
+        const tracks = barsRoot.firstElementChild.lastElementChild;
+        const scaleNote = makeResultElement("div", "sins-virtues-scale-note");
+        scaleNote.append(
+          makeResultElement("span", "", "罪侧独立分 0—100"),
+          makeResultElement("span", "", "德侧独立分 0—100")
+        );
+        card.append(labels, tracks, scaleNote);
+        pairs.appendChild(card);
+      });
+      section.appendChild(pairs);
+      root.appendChild(section);
+
+      root.appendChild(makeResultElement(
+        "p",
+        "result-footnote",
+        `${data.scoring_note} ${data.disclaimer} 分数高低不代表好坏、品格或现实行为；两侧分数彼此独立，不强制合计 100。`
+      ));
+      return true;
+    }
+
+    function appendComparePeople(root, people, detailsFor) {
+      const grid = makeResultElement("div", "compare-people");
+      people.forEach((person, index) => {
+        const card = makeResultElement("section", "compare-person");
+        const details = detailsFor(person);
+        card.append(
+          makeResultElement("h3", "", `${index ? "B" : "A"} · ${person.display_name || person.player_id}`),
+          makeResultElement("p", "compare-score-line", details.score),
+          makeResultElement("p", "compare-emphasis-line", details.emphasis)
+        );
+        if (Array.isArray(details.bars) && details.bars.length) {
+          const barsRoot = makeResultElement("div", "");
+          appendMetricBars(barsRoot, details.bars, "", "metric-bars-compact");
+          card.appendChild(barsRoot.firstElementChild.lastElementChild);
+        }
+        grid.appendChild(card);
+      });
+      root.appendChild(grid);
+    }
+
+    function renderLoveCompare(root, data) {
+      if (data.kind !== "love_compare" || !data.player_a || !data.player_b || !data.relation || !data.message) return false;
+      const hero = makeResultElement("div", "result-hero");
+      hero.append(
+        makeResultElement("p", "result-primary dnd-name", data.relation),
+        makeResultElement("p", "result-secondary", "LOVE LANGUAGE PAIR")
+      );
+      root.appendChild(hero);
+      appendResultTextSection(root, "关系提示", data.message);
+      appendComparePeople(root, [data.player_a, data.player_b], (person) => {
+        const scores = ["A", "B", "C", "D", "E"].map((code) => `${code}${person.scores[code]}`).join(" / ");
+        return {
+          score: scores,
+          emphasis: `主语言：${person.primary_names.join("、")}`,
+          bars: ["A", "B", "C", "D", "E"].map((code) => ({
+            label: code,
+            value: person.scores[code],
+            max: 12,
+            display: String(person.scores[code])
+          }))
+        };
+      });
+      appendResultTextSection(root, `给 ${data.player_a.display_name || data.player_a.player_id} 的实践建议`, (data.advice_for_a || []).join("\n\n"));
+      appendResultTextSection(root, `给 ${data.player_b.display_name || data.player_b.player_id} 的实践建议`, (data.advice_for_b || []).join("\n\n"));
+      return true;
+    }
+
+    function renderEcrCompare(root, data) {
+      if (data.kind !== "ecr_compare" || !data.player_a || !data.player_b || !data.combination || !data.message) return false;
+      const hero = makeResultElement("div", "result-hero");
+      hero.append(
+        makeResultElement("p", "result-primary dnd-name", data.combination),
+        makeResultElement("p", "result-secondary", "ATTACHMENT PAIR")
+      );
+      root.appendChild(hero);
+      appendComparePeople(root, [data.player_a, data.player_b], (person) => ({
+        score: `回避 ${Number(person.avoidance).toFixed(2)} / 焦虑 ${Number(person.anxiety).toFixed(2)}`,
+        emphasis: `类型：${person.type_name}`,
+        bars: [
+          {label: "回避", value: person.avoidance, min: 1, max: 7, display: Number(person.avoidance).toFixed(2)},
+          {label: "焦虑", value: person.anxiety, min: 1, max: 7, display: Number(person.anxiety).toFixed(2)}
+        ]
+      }));
+      appendResultTextSection(root, "组合提示", data.message);
+      root.appendChild(makeResultElement("p", "result-footnote", `来源：${data.source}`));
+      return true;
+    }
+
+    // Discussion: https://www.nature.com/articles/s41598-024-58901-2
+    // Platform reflection prompts, not the authors' individual scoring report.
+    // Pure presentation only: nearest response anchors describe the 1–5 axis;
+    // the half-step tolerance below avoids overstating small gaps, not a validated cutoff.
+    function describeRbiScores(scores) {
+      const labels = {sai: "陪伴与情感互动", fod: "履行伴侣责任", openness: "关系中的开放表达"};
+      const keys = Object.keys(labels);
+      if (!scores || keys.some(key => !Number.isFinite(scores[key]) || scores[key] < 1 || scores[key] > 5)) return null;
+      const anchors = ["", "较接近“完全没有”一端", "偏向“完全没有”一端", "接近中间选项", "偏向“非常符合”一端", "较接近“非常符合”一端"];
+      const meanings = {
+        sai: ["这周让关心变得可感知的情感互动，在你的自评中较少", "这周的情感互动有一定体现，可以留意哪些时刻让关心被感受到", "这周让关心变得可感知的情感互动，在你的自评中较多"],
+        fod: ["这周把共同期待落实为实际支持，在你的自评中体现较少", "这周有一定实际支持，可以留意它是否对应双方的共同期待", "这周把共同期待落实为实际支持，在你的自评中体现较多"],
+        openness: ["这周让伴侣了解你的需求与感受，在你的自评中体现较少", "这周有一定开放表达，可以留意表达之后是否增进了彼此理解", "这周让伴侣了解你的需求与感受，在你的自评中体现较多"]
+      };
+      const suggestions = {
+        sai: ["如果双方愿意，可各说一种能感到被在意的相处方式，选一件都舒服的小事试试", "可以回想一次双方都舒服的相处，把其中让人感到被在意的部分再安排一次", "可以问问对方哪些相处时刻最能感到被在意，保留双方都喜欢的方式"],
+        fod: ["可以选一件眼前的共同事务，商量谁来做、何时做，以及各自需要什么帮助", "可以拿一件日常分工对一下期待，看看双方说的“做到了”是否指同一件事", "可以一起检查现有分工，对一下双方对“做到了”的期待是否一致，再看需要怎样调整"],
+        openness: ["若时机合适，可以从一件小事说出自己的感受和需要，邀请对方说说听到了什么", "可以选一个还没聊清的需要，轮流说说各自理解，看看有没有遗漏", "可以挑一次已聊清的需要，共同约定一个可行回应，之后再问是否帮上了忙"]
+      };
+      const dimensions = keys.map(key => {
+        const value = scores[key];
+        const anchor = Math.round(value);
+        const direction = anchor < 3 ? 0 : anchor === 3 ? 1 : 2;
+        const position = value === 1 ? "在“完全没有”一端" : value === 5 ? "在“非常符合”一端" : anchors[anchor];
+        return {key, title: labels[key], text: `${value.toFixed(2)} / 5，${position}：${meanings[key][direction]}。${suggestions[key][direction]}。`};
+      });
+      // Compare hundredths, matching the visible scores and avoiding floating-point ties.
+      const points = Object.fromEntries(keys.map(key => [key, Math.round(scores[key] * 100)]));
+      const ordered = [...keys].sort((a, b) => points[a] - points[b]);
+      const [low, middle, high] = ordered;
+      const gap = points[high] - points[low];
+      const show = key => `${labels[key]} ${scores[key].toFixed(2)}`;
+      let observation;
+      if (gap < 50) {
+        const position = gap === 0 ? `三维同为 ${scores[low].toFixed(2)}`
+          : `三维在 ${scores[low].toFixed(2)}–${scores[high].toFixed(2)} 之间，仅差 ${(gap / 100).toFixed(2)}`;
+        const anchor = Math.round(keys.reduce((total, key) => total + scores[key], 0) / 3);
+        const reflection = anchor < 3 ? "本周三类互动在自评中都体现较少，可以先一起挑一件最愿意尝试的小事"
+          : anchor > 3 ? "本周三类互动在自评中都有较多体现，可以聊聊哪些值得继续、哪些需要调整"
+          : "三类互动都在刻度中间附近，可以从本周一个具体时刻谈谈彼此感受";
+        observation = `${position}，不必分出主次；${reflection}，无需为了分数刻意补齐。`;
+      } else {
+        const upperClose = points[high] - points[middle] < 50;
+        const lowerClose = points[middle] - points[low] < 50;
+        const bridges = {
+          'openness:sai': "开放表达比日常情感互动更突出，可以聊聊：已说清的需求，有没有转化为双方感受得到的关心",
+          'openness:fod': "开放表达比责任落实更突出，可以选一个已谈过的需要，看看是否形成了双方认可的分工与回应",
+          'sai:openness': "情感互动比开放表达更突出，可以在舒服的相处中留一点空间，说说尚未被了解的需要",
+          'sai:fod': "情感互动比责任落实更突出，可以聊聊日常的关心如何也体现在双方认可的实际分担上",
+          'fod:sai': "责任落实比情感互动更突出，可以聊聊实际付出之外，各自还通过什么感受到被在意",
+          'fod:openness': "责任落实比开放表达更突出，可以对照一次实际帮助，问问它是否回应了对方真正想要的支持"
+        };
+        if (upperClose && lowerClose) {
+          observation = `三维从${show(low)}到${show(high)}，相差 ${(gap / 100).toFixed(2)}，相邻分数仍较接近；可以围绕本周一件事，聊聊表达、实际回应和被关心的感受是否衔接。`;
+        } else if (upperClose) {
+          const reflection = {
+            sai: "可以聊聊说过的需要和实际支持，怎样也能成为双方感受得到的关心",
+            fod: "可以把相处中的关心与谈过的需要，落到一件双方认可的共同事务上",
+            openness: "可以借一次相处或实际帮助，说说各自的感受与需要是否被对方理解"
+          };
+          observation = `${show(middle)}与${show(high)}${points[middle] === points[high] ? "并列" : "较接近"}，${show(low)}在本次自评中相对少一些；${reflection[low]}。`;
+        } else if (lowerClose) {
+          const reflection = {
+            sai: "可以从双方喜欢的相处方式出发，聊清各自的需要，再商量一个实际回应",
+            fod: "可以聊聊实际付出是否让双方感到被在意，也留一点空间表达还没说出的需要",
+            openness: "可以挑一个已谈清的需要，一起商量怎样同时落实为可感知的关心和实际支持"
+          };
+          observation = `${show(high)}在本次自评中相对更突出，${show(low)}与${show(middle)}${points[low] === points[middle] ? "并列" : "较接近"}；${reflection[high]}。`;
+        } else {
+          observation = `${show(high)}与${show(low)}相差 ${(gap / 100).toFixed(2)}；${bridges[`${high}:${low}`]}。`;
+        }
+      }
+      return {dimensions, observation};
+    }
+
+    function appendRbiInterpretation(root, scores) {
+      const report = describeRbiScores(scores);
+      if (!report) return;
+      const section = makeResultElement("section", "rbi-interpretation");
+      section.appendChild(makeResultElement("h3", "", "理解这次互动"));
+      section.appendChild(makeResultElement("p", "research-help", "仅描述过去一周的自评方向；以下为平台反思建议，并非作者个人评分报告。"));
+      for (const item of [...report.dimensions, {title: "综合观察", text: report.observation}]) {
+        section.append(makeResultElement("h4", "", item.title), makeResultElement("p", "", item.text));
+      }
+      root.appendChild(section);
+    }
+
+    function appendResearchInterpretation(root, report) {
+      if (!report || typeof report.summary !== "string" || !report.summary.trim()
+          || !Array.isArray(report.dimension_notes) || !Array.isArray(report.recommendations)) return false;
+      if (report.dimension_notes.some(item => !item || typeof item.label !== "string" || typeof item.text !== "string")
+          || report.recommendations.some(item => typeof item !== "string")) return false;
+      const section = makeResultElement("section", "research-interpretation");
+      section.append(
+        makeResultElement("h3", "", "综合观察"),
+        makeResultElement("p", "research-summary", report.summary)
+      );
+      if (report.dimension_notes.length) {
+        const dimensions = makeResultElement("div", "research-dimensions");
+        dimensions.appendChild(makeResultElement("h3", "", "维度解读"));
+        for (const item of report.dimension_notes) {
+          const entry = makeResultElement("div", "research-dimension");
+          entry.append(
+            makeResultElement("h4", "", item.label),
+            makeResultElement("p", "", item.text)
+          );
+          dimensions.appendChild(entry);
+        }
+        section.appendChild(dimensions);
+      }
+      if (report.recommendations.length) {
+        const actions = makeResultElement("div", "research-actions");
+        actions.appendChild(makeResultElement("h3", "", "可以试试"));
+        const list = makeResultElement("ol", "");
+        for (const tip of report.recommendations) list.appendChild(makeResultElement("li", "", tip));
+        actions.appendChild(list);
+        section.appendChild(actions);
+      }
+      root.appendChild(section);
+      return true;
+    }
+
+    function researchScoreLabel(value, bounds) {
+      const node = makeResultElement("dd", "", "");
+      if (!bounds || !Number.isFinite(bounds.min) || !Number.isFinite(bounds.max)
+          || bounds.max <= bounds.min || !["mean", "sum", "difference"].includes(bounds.kind)) {
+        node.textContent = value.toFixed(2);
+        return node;
+      }
+      node.appendChild(makeResultElement("span", "research-score-value", value.toFixed(2)));
+      if (bounds.kind === "difference") {
+        node.appendChild(makeResultElement("span", "research-score-range", `范围 ${bounds.min}～${bounds.max}`));
+      } else {
+        node.appendChild(makeResultElement("span", "research-score-maximum", ` / ${bounds.max}`));
+        if (bounds.kind === "sum" && bounds.min !== 0) {
+          node.appendChild(makeResultElement("span", "research-score-range", `范围 ${bounds.min}～${bounds.max}`));
+        }
+      }
+      return node;
+    }
+
+    function renderResearchResult(root, data) {
+      if (data?.kind !== "research_scale" || !data.scores || !data.dimensions) return false;
+      const scores = Object.entries(data.scores);
+      if (!scores.length || scores.some(([key, value]) => !Number.isFinite(value) || !data.dimensions[key])) return false;
+      const result = makeResultElement("div", "research-result");
+      const list = makeResultElement("dl", "research-scores");
+      for (const [key, value] of scores) {
+        // Trim only the repeated presentation suffix; keep saved values and keys intact.
+        const label = data.dimensions[key].replace(/（(?:4399)?描述性?均分）$/, "");
+        const row = makeResultElement("div", "research-score");
+        row.append(makeResultElement("dt", "", label), researchScoreLabel(value, data.score_ranges?.[key]));
+        list.appendChild(row);
+      }
+      result.appendChild(list);
+      const report = data.interpretation;
+      const matchingReport = report && Array.isArray(report.dimension_notes)
+        && report.dimension_notes.every(item => item && typeof item.key === "string"
+          && Object.prototype.hasOwnProperty.call(data.scores, item.key)
+          && Number.isFinite(item.score) && Math.abs(data.scores[item.key] - item.score) < 0.000001);
+      if (!appendResearchInterpretation(result, matchingReport ? report : null) && CONFIG.game === "rbi") {
+        appendRbiInterpretation(result, data.scores);
+      }
+      const source = makeResultElement("p", "research-help");
+      setResearchLinkedText(source, researchAttribution().url);
+      const link = source.querySelector("a");
+      if (link) link.textContent = "查看研究原文 ↗";
+      result.appendChild(source);
+      root.appendChild(result);
+      return true;
+    }
+
+    function renderResult(data, fallbackText) {
+      const root = $("resultStructured");
+      const fallback = $("resultText");
+      if (resultRadarCleanup) {
+        resultRadarCleanup();
+        resultRadarCleanup = null;
+      }
+      root.innerHTML = "";
+      let rendered = false;
+      try {
+        if (CONFIG.research) rendered = renderResearchResult(root, data);
+        else if (data?.kind === "mbti") rendered = renderMbtiResult(root, data);
+        else if (data?.kind === "enneagram") rendered = renderEnneagramResult(root, data);
+        else if (data?.kind === "dnd") rendered = renderDndResult(root, data);
+        else if (data?.kind === "love") rendered = renderLoveResult(root, data);
+        else if (data?.kind === "ecr") rendered = renderEcrResult(root, data);
+        else if (data?.kind === "humanity") rendered = renderHumanityResult(root, data);
+        else if (data?.kind === "sins_virtues") rendered = renderSinsVirtuesResult(root, data);
+        else if (data?.kind === "love_compare") rendered = renderLoveCompare(root, data);
+        else if (data?.kind === "ecr_compare") rendered = renderEcrCompare(root, data);
+      } catch (_) {
+        rendered = false;
+      }
+      root.hidden = !rendered;
+      fallback.hidden = rendered;
+      if (!rendered) {
+        root.innerHTML = "";
+        fallback.textContent = CONFIG.research ? "暂时无法展示分数，请刷新重试。" : fallbackText;
+      }
+    }
+
+    async function submitAnswers() {
+      if (busy || !activeState || !answers.every(Number.isInteger)) return;
+      busy = true;
+      showError();
+      setButtonsDisabled(true);
+      $("statusText").textContent = "SYSTEM / CALCULATING";
+      try {
+        renderState(await api("answer_batch", {answers: [...answers]}));
+      } catch (error) {
+        showError(error.message);
+        $("statusText").textContent = "SYSTEM / RETRY";
+      } finally {
+        busy = false;
+        setButtonsDisabled(false);
+      }
+    }
+
+    async function compareResults() {
+      if (busy) return;
+      const playerId = $("comparePlayerId").value.trim();
+      if (!playerId) {
+        showError("请输入对方用户名或账号 id；游客请输入 guest: 开头的 id");
+        return;
+      }
+      busy = true;
+      showError();
+      setButtonsDisabled(true);
+      $("statusText").textContent = "SYSTEM / COMPARING";
+      try {
+        renderState(await api("compare", {player_id_b: playerId}));
+      } catch (error) {
+        showError(error.message);
+        $("statusText").textContent = "SYSTEM / RETRY";
+      } finally {
+        busy = false;
+        setButtonsDisabled(false);
+      }
+    }
+
+    async function resume() {
+      showError();
+      try {
+        renderState(await api("result"));
+      } catch (error) {
+        if (error.status === 404) {
+          $("identity").textContent = token() ? "ACCOUNT" : "GUEST / LOCAL SAVE";
+          if (hasModes) renderModes();
+          else await start(CONFIG.research ? "full" : "standard");
+        } else {
+          showError(error.message);
+          if (CONFIG.research) {
+            $("statusText").textContent = "SYSTEM / RETRY";
+            $("loadingPanel").querySelector("span").textContent = "连接失败，请刷新重试";
+            showPanel("loadingPanel");
+          } else renderModes();
+        }
+      }
+    }
+    $("previousButton").addEventListener("click", () => goToQuestion(cursor - 1));
+    $("saveAnswerButton").addEventListener("click", () => {
+      if (busy || !activeState || !Number.isInteger(answers[cursor])) return;
+      if (cursor === activeState.total - 1) saveResearchAnswer(cursor, true);
+      else goToQuestion(cursor + 1);
+    });
+    $("reviewButton").addEventListener("click", renderReview);
+    $("modifyButton").addEventListener("click", () => goToQuestion(cursor));
+    $("submitButton").addEventListener("click", submitAnswers);
+    $("compareButton").addEventListener("click", compareResults);
+    $("restartButton").addEventListener("click", () => {
+      if (CONFIG.research) {
+        requestRestart();
+        return;
+      }
+      showError();
+      if (activeState) localStorage.removeItem(draftKey());
+      if (hasModes) renderModes();
+      else start("standard", true);
+    });
+    resume();
+  </script>
+</body>
+</html>

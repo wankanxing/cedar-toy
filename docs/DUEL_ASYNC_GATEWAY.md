@@ -1,0 +1,173 @@
+# 双弈透明 async MCP gateway
+
+## 目标与当前链路
+
+外部地址完全不变：仍使用 `https://toy.cedarstar.org/`、`/mcp` 或已有的
+`/{token}`，鉴权仍支持路径 token 与 `Authorization: Bearer`，调用仍是
+JSON-RPC `tools/call -> play(game="duel")`。线上链路为：
+
+```text
+Cloudflare -> Nginx 127.0.0.1:8002
+  GET / 与普通请求 -> CedarToy 127.0.0.1:8004
+  候选 MCP POST          -> async gateway 127.0.0.1:8003
+                                  duel -> 127.0.0.1:8772
+                                  non-duel -> 127.0.0.1:8004
+```
+
+网关不处理网页 GET；挂等控制由平台与 `vendor/duel` 后端共同校验。
+
+## Duel 自动挂等
+
+这里的“挂等”严格指**同一个尚未结束的 MCP POST 长响应**，不是后台任务、订阅或
+server-push。客户端/ChatGPT 一旦结束或取消这次工具请求，CedarToy 没有协议通道替它
+创建下一轮对话，也不能把 SQLite 未读状态主动送进已经休眠的会话。官方 OpenAI 文档中
+与 MCP 工具有关的流式事件也属于正在生成的同一个 Response；本服务的 initialize 只声明
+`tools` capability，且明确不提供 GET event stream。
+
+因此 AI 主动 `new`/`rematch`/`join` 得到 `pending`/`waiting` 后，必须在**当前模型回复内**
+立刻根据返回的 `next_call` 发起 `state(wait=true)`；每次行动优先用
+`move(wait=true)`。宿主结束工具链后没有自动唤醒机制；下次进入双弈时，
+通过 `play(game="duel",action="rooms")` 查看未读通知，`state` 等双弈回包也会返回
+相关未读状态。**其他游戏的 Guide、list_games 和 account 不再附加双弈提醒**。
+这些都属于请求到达后的读取，不是后台推送。
+
+1. 8003 先向 8004 发一次短 prepare。8004 使用原有 token、账号类型、slot、
+   AI↔human 绑定、防沉迷预检与 Duel 独立限流逻辑，覆盖模型自报的
+   `player_id`，并按绑定表决定 `opponent_id`。
+2. prepare 返回一次性 ticket 和可信后端 payload，不调用 8772，不进入
+   long-poll。ticket 默认 720 秒过期，覆盖默认 600 秒连续等待及 buffer。
+3. 8003 直接 async await `127.0.0.1:8772/mcp/play`。第一次请求保留原始受信
+   payload，因此 `move(wait=true)` 的落子和附言只执行一次。
+4. 如果 8772 返回内部 `still_waiting`，8003 不完成外层 MCP 请求，而是改用只含
+   canonical `player_id`、`room_id`、`action=state`、`wait=true`，以及相同
+   `wait_generation`、`wait_resume=true` 的无副作用 payload
+   继续等待。后续心跳绝不重放 move、message、resign 等动作。若 8772 因等待槽瞬时
+   满载返回 `wait_downgraded=true`，8003 也会短暂退避后继续 `state(wait=true)`，不会
+   提前结束外层挂等或形成热循环。
+5. 只有轮到当前 AI、本人淘汰/离席/失活、房间终局/归档/取消、后端错误等
+   有意义结果才 finalize 并向模型返回。到达服务端连续等待上限时，才会
+   finalize 最后一个 `still_waiting`。prepare/finalize 在整段等待中各只执行一次。
+6. 流式响应每 12 秒发送一个合法 JSON 前导空白作为纯网络 keepalive。空白 chunk
+   不是 JSON-RPC 响应；最后只输出一份完整 JSON，整个 body 仍可直接被标准
+   `json.loads` 解析。响应带 `X-Accel-Buffering: no`，Nginx 候选 MCP location 也必须
+   `proxy_buffering off` 并关闭 gzip，避免微小 keepalive chunk 被中间层攒住。
+
+连续挂等默认最多 200 个 coroutine，不占用 8004 的同步 worker。转发 8004
+的非 Duel 请求使用独立连接池，不会被 Duel 长挂等占尽连接。客户端断开或
+coroutine 取消会取消当前 8772 请求，并 best-effort 调用 abandon 立即丢弃 ticket；
+如清理请求也失败，TTL 与 600 张 ticket 硬上限仍能防止无界泄漏。
+
+> 8772 自身仍是 30 秒短心跳。只有绕过 8003 直连 8772 时，调用方才可能看到
+> `still_waiting` 并需自行续等；官方 toy.cedarstar.org MCP 地址不会每 30 秒把它返回模型。
+> 8003 的 `MAX_CONTINUOUS_WAIT_SECONDS` 默认是 600 秒：它把多个 30 秒短轮询隐藏在
+> 一次外层 POST 内，并不是请求结束后仍运行 600 秒的后台 watcher。到时返回
+> `still_waiting` 和新的 `next_call`；宿主若仍允许同一回复继续，可再发一次挂等请求。
+
+## 显式停止与旧链失效
+
+想停就先调用 `play(game="duel", action="cancel_wait", params={"room_id":"..."})`，
+不要只在自然语言里说停。它只取消 canonical player + room 的挂等；不读写棋局、
+revision、事件、席位、筹码或在线状态，也不改变邀请房 90/180 秒托管规则。
+收到 `wait_cancelled` 必须停止旧调用链，不行动、不自动续等；恢复时显式发起新的
+`state(wait=true)` 或 `move(wait=true)`。
+
+每次显式房间请求由平台生成有序 `wait_generation`；心跳和满载重试始终沿用它。
+新 wait 替代旧链，同房间非 wait 操作使旧链失效。后端通过独立取消事件及时结束等待，
+并保留有界、带 TTL 的代际墓碑，拒绝迟到的旧请求。终局仍可返回终局通知，旧链不能续等。
+平台 finalize 再核验代际，丢弃已取消但在网络中缓冲的“轮到你”响应。
+断线/超时清理仅释放对应 generation，不会取消新链；普通操作有独立网关容量。
+日志 `duel_wait created/superseded/cancelled/finished/abandoned` 只含 player、room，
+不含 token。控制状态为单进程内存，最长保留 3720 秒；后端重启后拒绝未知续等，
+也拒绝早于本次启动时间的迟到首请求。过期代际在墓碑清理后仍被拒绝。
+同代际仅允许串行 `state(wait=true, wait_resume=true)` 心跳；重复首请求或并发续等
+不会重放落子/附言，也不会占用第二条 wait。内部代际字段不向公共 MCP schema 暴露。
+网关断线清理在有界、免受 ASGI 任务组取消的区域内执行，分别释放后端代际与平台 ticket；
+本地 stdio adapter 在断线或达到等待上限时也按代际释放。
+平台与后端应配套更新，各保持单 worker，并使用同一主机时钟生成有序代际。
+平台重启后旧 ticket 失效，不能 finalize 旧结果；不支持跨 worker 共享内存控制状态。
+已完成最终校验并交付的响应无法撤回；
+该接口不能阻止宿主无视取消提示后主动提交新的动作。
+
+## 安全与生命周期
+
+- prepare/finalize/abandon 同时要求来源是 loopback 且
+  `X-CedarToy-Gateway-Secret` 与 `DUEL_GATEWAY_SHARED_SECRET` 恒时比较一致。
+- 真实 secret 必须用 `python3 -c 'import secrets; print(secrets.token_hex(32))'` 生成，
+  分别配置给 CedarToy 与 gateway，不得提交到仓库。
+- Nginx 必须对 `/_internal/duel-gateway/` 明确返回 404。只靠来源 IP 不够，因为
+  公网请求经本机 Nginx 转发后在 CedarToy 看起来也可能来自 loopback。
+- 网关只把原 Authorization/路径 token 交给 loopback prepare；它不记录 token，
+  也不把 token 发给 8772。
+- 8003 只监听 `127.0.0.1`，保持单 ASGI worker，避免多进程把全局并发上限成倍放大。
+  ticket 存在 CedarToy 单进程内。
+
+## 配置（仅示例，不直接部署）
+
+依赖：`fastapi`、`uvicorn`、`httpx`。Supervisor 与 Nginx 完整片段分别见
+[`deploy/supervisor-duel-async-gateway.conf.example`](../deploy/supervisor-duel-async-gateway.conf.example)
+和 [`deploy/nginx-duel-async-gateway.conf.example`](../deploy/nginx-duel-async-gateway.conf.example)。
+
+- `DUEL_GATEWAY_SHARED_SECRET`：必填；CedarToy 与 gateway 必须相同。
+- `DUEL_GATEWAY_CEDARTOY_ORIGIN`：线上应为 `http://127.0.0.1:8004`。
+- `DUEL_GATEWAY_DUEL_ORIGIN`：默认 `http://127.0.0.1:8772`。
+- `DUEL_GATEWAY_MAX_CONCURRENCY`：默认 200，允许 100–500。
+- `DUEL_GATEWAY_MAX_WAIT_SECONDS`：默认 600，允许 60–3600；gateway 与 CedarToy 要配成相同值。
+- `DUEL_GATEWAY_KEEPALIVE_SECONDS`：默认 12，允许 5–30，只影响外层网络空白 chunk。
+- `DUEL_GATEWAY_TICKET_TTL_SECONDS`：只配 CedarToy，默认为最大等待 + 120，
+  不得低于最大等待 + 60；600 秒等待时建议 720。
+
+本地前台验证：
+
+```bash
+export DUEL_GATEWAY_SHARED_SECRET='<随机 64 位 hex>'
+export DUEL_GATEWAY_CEDARTOY_ORIGIN='http://127.0.0.1:8004'
+python3 -m uvicorn duel_async_gateway:app --host 127.0.0.1 --port 8003 --workers 1
+```
+
+## 上线验证与回滚
+
+1. 确认 CedarToy 监听 8004，且已合并 secret、最大等待和 ticket TTL 环境变量。
+2. 启动 8003，检查 `curl http://127.0.0.1:8003/health`。
+3. 本机分别验证路径 token、Bearer、非 Duel `tools/list` 和 Duel `move/state wait=true`。
+4. 确认 Nginx 8002 的 MCP POST 命中 8003、非 Duel 由 8003 转发 8004，并确认
+   `proxy_buffering off`。观察 8004 worker、8003 coroutine、502/504 与客户端取消。
+5. 回滚只需让候选 MCP POST 恢复直接转发 8004；外部 URL 与 token 无需改。
+
+不要把 8003 暴露为新的用户地址，也不要删除 `server.py` 的同步 Duel fallback；后者
+用于未切流、紧急回滚和本地诊断。
+
+## 按账号 MCP 传输证据
+
+`data/mcp_diagnostics_config.json` 的已有允许列表、到期时间、采样和总量上限仍由
+`scripts/mcp_diagnostics_config.py` 管理。新增字段只写入已允许监控的账号记录；
+不记录凭据、JSON-RPC 原始 ID、请求/响应正文或任意客户端方法名。已知根工具名可识别为
+`method=get_guide` 等直调，或 `method=tools/call, tool=get_guide`。仅 `get_guide` 直调兼容
+标准 `tools/call` 执行链路，支持原始参数对象与 `arguments` 包装，不新增公开 schema；
+其他工具名的直调仅作诊断分类，仍返回 `-32601`。网关保持原样代理，诊断保留原始调用方式。
+
+普通 MCP 代理链路用 `trace_id` 关联 edge/main，`request_id` 仍是每层独立事件 ID。
+网关剥离外部追踪头，用现有共享密钥签发绑定账号、有效期 300 秒的内部证明；主服务只在
+本地连接、独立识别为获准监控账号且证明通过时采纳。主服务的
+`delivery.gateway_link_verified` 与网关的 `delivery.upstream_trace_match` 可确认关联。
+追踪头不会转发给客户端，也不参与业务鉴权。Duel/自走棋的独立 prepare/finalize 链路
+不使用这套普通代理关联；其外层 ASGI 发送阶段仍可观察。
+
+`boundary_ms` 是相对各层请求开始时间的观测时刻，不能跨层直接相减。字段只随既有日志
+记录输出，不为每个数据块新增日志；缺少记录也可能是采样、配额或写日志失败。
+
+| 字段 | 能证明的边界 |
+| --- | --- |
+| `main_headers_write_returned` / `main_body_write_returned` | 主服务本地写接口返回；不代表对端接收 |
+| `upstream_headers_received` / `upstream_body_read_complete` | 网关拿到上游响应头 / 完整读完上游响应体 |
+| `asgi_headers_send_returned` | ASGI 响应头 send 返回；服务器可能仍在缓冲 |
+| `asgi_final_body_send_returned` | `more_body=false` 的最终响应体 send 返回；不代表 Nginx、隧道或客户端已收到 |
+| `*_failed` / `*_cancelled` | 对应接口抛出异常 / 取消；不记录异常原文 |
+| `asgi_disconnect_observed` | 应用实际读到了 ASGI disconnect 事件；没有该字段不能证明连接一直正常 |
+
+`delivery` 包含主服务预期/已写字节数、网关上游已读字节数、ASGI send 返回的数据块数及
+字节数；中途异常时只累计已返回的数据块。`reasons=delivery_incomplete` 表示已开始发送
+但未观察到最终返回。原 `response_ready` 只表示已生成或解析响应，`response_started`
+在发送前设置，`completed` 只表示处理函数退出，均不能单独当作客户端回执。
+
+若关联成功且完整读入、最终 ASGI send 均已返回，下一步需要 Nginx/隧道与真实客户端
+同次请求的接收、解析及 JSON-RPC 匹配证据；不能从服务端 `-32601` 推断客户端超时原因。

@@ -1,0 +1,124 @@
+import json
+
+from .base import (
+    SAVE_ROOT,
+    VendorCmdError,
+    VendorCmdGame,
+    export_json_saves,
+    import_json_saves,
+    require_player_id,
+    require_save_confirm,
+)
+
+
+SAVE_FILES = {"leek_save.json": "leek_save.json"}
+
+
+RUNNER_CODE = r'''
+import json
+import os
+import sys
+
+payload = json.load(sys.stdin)
+save_dir = payload["save_dir"]
+vendor_dir = payload["vendor_dir"]
+command = payload.get("command") or "status"
+
+sys.path.insert(0, vendor_dir)
+os.chdir(save_dir)
+import leek
+
+if payload.get("reset"):
+    for name in ("leek_save.json", "leek_save.json.tmp", "leek_save.json.bak"):
+        try:
+            os.remove(os.path.join(save_dir, name))
+        except FileNotFoundError:
+            pass
+
+load_warning = ""
+save_path = os.path.join(save_dir, "leek_save.json")
+if not payload.get("reset") and os.path.exists(save_path):
+    try:
+        with open(save_path, "r", encoding="utf-8") as f:
+            saved_data = json.load(f)
+        if not isinstance(saved_data, dict):
+            raise ValueError("存档顶层不是 JSON 对象")
+        version = saved_data.get("version", 1)
+        try:
+            is_outdated = version < leek._SAVE_VERSION
+        except TypeError:
+            raise ValueError(f"存档版本字段无效：{version!r}")
+        if is_outdated:
+            raise ValueError(f"存档版本 {version} 低于当前版本 {leek._SAVE_VERSION}")
+    except (OSError, UnicodeError, ValueError) as exc:
+        backup_path = save_path + ".bak"
+        os.replace(save_path, backup_path)
+        load_warning = (
+            f"⚠️ 存档告警：已备份为 {os.path.basename(backup_path)}（原因：{exc}），"
+            "本次已重建新档。"
+        )
+
+result = leek.cmd(command)
+if load_warning:
+    print(load_warning)
+print(result, end="")
+'''
+
+
+GAME = VendorCmdGame("leek", "vendor/leek", RUNNER_CODE)
+
+
+def save_summary(player_id):
+    """给平台 my_saves 用：读存档提取天数/现金/职业，无档或解析失败返回 None。"""
+    path = SAVE_ROOT / "leek" / require_player_id(player_id) / "leek_save.json"
+    try:
+        state = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, ValueError):
+        return None
+    if not isinstance(state, dict):
+        return None
+    return {
+        "day": state.get("day"),
+        "cash": state.get("cash"),
+        "career": state.get("career"),
+        "holdings": len(state.get("holdings") or {}),
+    }
+
+
+def _has_save(player_id):
+    return (
+        SAVE_ROOT / "leek" / require_player_id(player_id) / "leek_save.json"
+    ).exists()
+
+
+def play(arguments):
+    action = (arguments.get("action") or "cmd").strip()
+    player_id = arguments.get("player_id")
+    if action in {"new", "leek_new"}:
+        require_save_confirm(arguments, lambda: _has_save(player_id), save_summary, "leek")
+        seed = arguments.get("seed")
+        career = str(arguments.get("career") or "").strip().lower()
+        parts = ["new_game"]
+        if career == "fund":
+            parts.append("fund")
+        if seed is not None:
+            parts.append(str(seed))
+        text = GAME.run(player_id, " ".join(parts), reset=True)
+    elif action in {"cmd", "leek_cmd"}:
+        command = arguments.get("command")
+        if not isinstance(command, str) or not command.strip():
+            raise VendorCmdError("command 参数必填")
+        text = GAME.run(player_id, command)
+    elif action == "export":
+        text = export_json_saves("leek", player_id, SAVE_FILES)
+    elif action == "import":
+        require_save_confirm(arguments, lambda: _has_save(player_id), save_summary, "leek")
+        text = import_json_saves(
+            "leek",
+            player_id,
+            arguments.get("save_data"),
+            SAVE_FILES,
+        )
+    else:
+        raise VendorCmdError("未知 leek action")
+    return {"game": "leek", "player_id": player_id, "text": text}

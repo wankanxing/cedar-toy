@@ -1,0 +1,1482 @@
+import asyncio
+import json
+import sys
+import tempfile
+import types
+import unittest
+from pathlib import Path
+from unittest.mock import AsyncMock, Mock, patch
+
+import httpx
+from fastapi import HTTPException
+
+
+BACKEND_DIR = Path(__file__).resolve().parents[1]
+if str(BACKEND_DIR) not in sys.path:
+    sys.path.insert(0, str(BACKEND_DIR))
+
+database_stub = types.ModuleType("database")
+database_stub.DEFAULT_SETTINGS = {
+    "judge_prompt": "judge",
+    "generate_prompt": "generate",
+}
+database_stub.fetch_all = AsyncMock(return_value=[])
+database_stub.fetch_one = AsyncMock(return_value=None)
+database_stub.execute = AsyncMock(return_value=1)
+auth_utils_stub = types.ModuleType("auth_utils")
+auth_utils_stub.admin_player = lambda: None
+auth_utils_stub.verify_password = lambda *_args: True
+sys.modules["database"] = database_stub
+sys.modules["auth_utils"] = auth_utils_stub
+
+import judge  # noqa: E402
+from routers import admin as admin_router  # noqa: E402
+
+
+def setUpModule():
+    # Fake completions must never start the production cost writer. Patching
+    # database_stub.DB_PATH only isolates provider quotas, not api_costs.DB_PATH.
+    recorder = patch.object(judge.api_costs, "record")
+    recorder.start()
+    unittest.addModuleCleanup(recorder.stop)
+
+
+CONFIG = {
+    "id": 7,
+    "name": "primary",
+    "api_url": "https://example.test/v1",
+    "api_key": "secret-key-value",
+    "model": "judge-model",
+    "purpose": "both",
+    "enabled": 1,
+    "priority": 0,
+}
+MESSAGES = [{"role": "user", "content": "hello"}]
+
+
+def response(status: int, *, headers=None, content="ok") -> httpx.Response:
+    request = httpx.Request("POST", "https://example.test/v1/chat/completions")
+    body = {
+        "choices": [
+            {
+                "finish_reason": "stop",
+                "message": {"content": content},
+            }
+        ]
+    }
+    return httpx.Response(status, headers=headers, json=body, request=request)
+
+
+class FakeClient:
+    outcomes = []
+    timeouts = []
+    payloads = []
+    urls = []
+
+    def __init__(self, *, timeout):
+        self.timeouts.append(timeout)
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *_args):
+        return None
+
+    def build_request(self, method, url, *, headers, json):
+        return httpx.Request(method, url, headers=headers, json=json)
+
+    async def send(self, request):
+        return await self.post(
+            str(request.url), headers=request.headers, json=json.loads(request.content)
+        )
+
+    async def post(self, url, *, headers, json):
+        del headers
+        self.urls.append(url)
+        self.payloads.append(json)
+        outcome = self.outcomes.pop(0)
+        if isinstance(outcome, BaseException):
+            raise outcome
+        return outcome
+
+
+class AskContextTests(unittest.IsolatedAsyncioTestCase):
+    async def test_versioned_rules_and_database_override_are_not_stacked(self):
+        rules = (judge.CONFIG_DIR / 'judge_prompt.txt').read_text()
+        for rule in ['是 / 不是 / 无关 / 是也不是', '同义或上位概念', '核心事实、身份或因果错误',
+                     '人物修饰语', 'A与B的关系', 'A或B是否成立', '确实独立被询问',
+                     '只有无法判断提问者所问阶段', '汤底未提及不等于事实为假']:
+            self.assertIn(rule, rules)
+        for override in [None, {'value': '数据库规则'}, {'value': ' '}]:
+            with self.subTest(override=override), patch.object(judge, 'fetch_one', AsyncMock(return_value=override)), patch.object(judge, '_chat_validated', AsyncMock(return_value='不是')) as chat:
+                result = await judge.judge_ask('汤面', '汤底', '问题')
+            self.assertEqual(result['judgment'], 'no')
+            messages = chat.call_args.args[0]
+            self.assertEqual(messages[0]['content'], '数据库规则' if override and override['value'].strip() else rules)
+            self.assertNotIn('上位概念', messages[1]['content'])
+            self.assertLessEqual(len(messages[1]['content']), 204)
+
+    async def test_only_last_three_questions_are_reference_context(self):
+        history = ["过早的问题", "那个人在实验室吗？", "他拿着探测器吗？", "它打开了吗？"]
+        question = "这个实验没有被观测时会怎样？"
+        with (
+            patch.object(judge, "_get_judge_prompt", AsyncMock(return_value="judge")),
+            patch.object(judge, "_chat_validated", AsyncMock(return_value="不是")) as chat,
+        ):
+            result = await judge.judge_ask("汤面", "汤底", question, history=history)
+
+        self.assertEqual(result["judgment"], "no")
+        messages = chat.call_args.args[0]
+        self.assertEqual([message["role"] for message in messages], ["system", "system", "user"])
+        self.assertEqual(messages[-1]["content"], (
+            "请判定下面的玩家问题。\n汤面：汤面\n汤底：汤底\n"
+            "【上文，仅用于理解指代】\n1. 那个人在实验室吗？\n2. 他拿着探测器吗？\n3. 它打开了吗？\n"
+            f"【本次唯一需要判定的问题】\n{question}"
+        ))
+        instruction = messages[1]["content"]
+        for rule in ["只判定【本次唯一需要判定的问题】", "上文不得作为待判内容",
+                     "仅用于理解代词、省略语和上下文指代", "事实判断仍须依据汤面、汤底独立完成",
+                     "不继承前一题的判定或状态"]:
+            self.assertIn(rule, instruction)
+
+    async def test_first_ask_has_no_history_and_never_reuses_previous_call(self):
+        with (
+            patch.object(judge, "_get_judge_prompt", AsyncMock(return_value="judge")),
+            patch.object(judge, "_chat_validated", AsyncMock(return_value="是")) as chat,
+        ):
+            await judge.judge_ask("汤面", "汤底", "此前的问题", history=["历史问题"])
+            await judge.judge_ask("汤面", "汤底", "当前问题")
+        prompt = chat.call_args.args[0][-1]["content"]
+        self.assertIn("【上文，仅用于理解指代】\n（无）\n【本次唯一需要判定的问题】\n当前问题", prompt)
+        self.assertNotIn("历史问题", prompt)
+        self.assertNotIn("此前的问题", prompt)
+
+
+class GuessScoringTests(unittest.IsolatedAsyncioTestCase):
+    def assert_score(self, missing, score, expected_score, expected_success):
+        for reported_success in [False, True]:
+            with self.subTest(missing=missing, score=score, reported_success=reported_success):
+                result = judge._parse_guess_json(json.dumps({
+                    "success": reported_success, "score": score,
+                    "missing_core_count": missing, "core_checks": [],
+                    "public_answer": "公开汤底",
+                }))
+                self.assertEqual(result["score"], expected_score)
+                self.assertEqual(result["success"], expected_success)
+                self.assertEqual(result["missing_core_count"], missing)
+
+    def test_no_missing_core_conditions_has_75_floor(self):
+        for score, expected in [(0, 75), (60, 75), (74, 75), (75, 75),
+                                (76, 76), (79, 79), (80, 80), (100, 100)]:
+            self.assert_score(0, score, expected, True)
+
+    def test_other_missing_core_bands_keep_existing_bounds(self):
+        for missing, score, expected_score, success in [
+            (1, 0, 60, False), (1, 59, 60, False), (1, 60, 60, False),
+            (1, 74, 74, False), (1, 75, 75, True), (1, 79, 79, True),
+            (1, 80, 79, True), (1, 100, 79, True),
+            (2, 0, 59, False), (2, 39, 59, False), (2, 40, 40, False),
+            (2, 59, 59, False), (2, 60, 59, False), (2, 75, 59, False),
+            (2, 100, 59, False), (3, 0, 0, False), (3, 39, 39, False),
+            (3, 40, 39, False), (3, 75, 39, False), (4, 100, 39, False),
+        ]:
+            self.assert_score(missing, score, expected_score, success)
+
+    async def test_guess_request_and_result_preserve_75_point_pass(self):
+        raw = json.dumps({"success": True, "score": 75, "missing_core_count": 0,
+                          "core_checks": [], "public_answer": "公开汤底"})
+        with (
+            patch.object(judge, "_get_judge_prompt_guess", AsyncMock(return_value="75 分通关")),
+            patch.object(judge, "_chat", AsyncMock(return_value=raw)) as chat,
+        ):
+            result = await judge.judge_guess("汤面", "汤底", "完整的故事还原")
+        self.assertTrue(result["success"])
+        self.assertEqual(result["score"], 75)
+        self.assertEqual(result["answer"], "公开汤底")
+        instruction = chat.call_args.args[0][1]["content"]
+        self.assertIn("missing_core_count == 0 且 score >= 75 才允许 success=true", instruction)
+        self.assertNotIn("score >= 80", instruction)
+        self.assertTrue(chat.call_args.kwargs["validator"](raw))
+
+
+class ClueParsingTests(unittest.IsolatedAsyncioTestCase):
+    ANSWER = (
+        "汤底正文\n"
+        "【线索公布】第一条线索【线索公布结束】\n"
+        "中间内容\n"
+        "【线索公布】第二条具体线索【线索公布结束】"
+    )
+
+    async def test_empty_clue_marker_keeps_judgment_without_publishing(self):
+        with (
+            patch.object(judge, "_get_judge_prompt", AsyncMock(return_value="judge")),
+            patch.object(judge, "_get_judge_prompt_clue", AsyncMock(return_value="clue")),
+            patch.object(
+                judge,
+                "_chat_validated",
+                AsyncMock(return_value="是\n【线索公布】"),
+            ),
+        ):
+            result = await judge.judge_ask("汤面", self.ANSWER, "问题")
+
+        self.assertEqual(result["judgment"], "yes")
+        self.assertIsNone(result["clue"])
+        self.assertIsNone(judge._extract_clue_from_ask("是\n【线索公布】"))
+
+    def test_specific_clue_matches_second_closed_block(self):
+        clue = judge._extract_clue_from_answer(self.ANSWER, "第二条具体线索")
+        self.assertEqual(clue, "第二条具体线索")
+
+    def test_unmatched_specific_clue_does_not_fallback_to_first(self):
+        clue = judge._extract_clue_from_answer(self.ANSWER, "不存在的模糊线索")
+        self.assertIsNone(clue)
+
+    def test_normal_closed_clue_block_remains_available(self):
+        clue = judge._extract_clue_from_answer(self.ANSWER, "第一条线索")
+        self.assertEqual(clue, "第一条线索")
+
+    def test_legacy_unclosed_clue_format_remains_available(self):
+        answer = "汤底\n【线索公布】旧格式具体线索\n【隐藏后台设定】不要公开"
+        clue = judge._extract_clue_from_answer(answer, "旧格式具体线索")
+        self.assertEqual(clue, "旧格式具体线索")
+
+
+class HintContextTests(unittest.IsolatedAsyncioTestCase):
+    async def test_hint_config_priority_and_last_sixty_player_records(self):
+        rules = (judge.CONFIG_DIR / 'judge_prompt_hint.txt').read_text()
+        self.assertNotIn('无法看到', rules)
+        for rule in ['最近最多60条', '不得暗示汤底不成立或未支持的事实', '不做猜底式剧透']:
+            self.assertIn(rule, rules)
+        with patch.object(judge, 'fetch_one', AsyncMock(return_value={'value': '数据库提示规则'})):
+            self.assertEqual(await judge._get_judge_prompt_hint(), '数据库提示规则')
+        records = [{'player_id': 1, 'type': 'ask', 'content': f'问题{i}', 'judgment': 'no'} for i in range(65)]
+        records.append({'type': 'auto_hint', 'hint_text': '已经提供的方向'})
+        with patch.object(judge, 'fetch_one', AsyncMock(return_value=None)), patch.object(judge, '_chat_validated', AsyncMock(return_value='【提示】注意两种字色对应的状态')) as chat:
+            await judge.generate_hint('汤面', '汤底', records)
+        messages = chat.call_args.args[0]
+        self.assertEqual(messages[0]['content'], rules)
+        sent = json.loads(messages[-1]['content'].split('最近60条玩家记录（提问与猜汤底）：', 1)[1])
+        self.assertEqual([r['content'] for r in sent], [f'问题{i}' for i in range(5, 65)])
+        self.assertIn('不得为追求新方向虚构事实', messages[1]['content'])
+
+
+class PublicAnswerTests(unittest.TestCase):
+    def test_rizi_keeps_all_story_and_explanation_without_private_tail(self):
+        answer = (BACKEND_DIR / 'tests/fixtures/rizi_answer.txt').read_text()
+        expected = answer.split('**三、 核心判定引擎', 1)[0].strip()
+        self.assertEqual(judge.public_answer_from_full_answer(answer), expected)
+        self.assertIn('核心设定与诡计拆解', expected)
+        self.assertIn('意外流产的孩子', expected)
+
+    def test_normal_story_and_inline_mentions_are_unchanged(self):
+        for answer in ['母亲只是想保护孩子。', '【完整汤底】\n第一段\n【核心设定与诡计拆解】\n正常解释',
+                       '他把“【通关判定条件】”这几个字写在了纸上。\n她看完后笑了。']:
+            with self.subTest(answer=answer):
+                self.assertEqual(judge.public_answer_from_full_answer(answer), answer)
+
+    def test_private_sections_do_not_remove_later_public_sections(self):
+        answer = '【完整汤底】\n正文\n【通关判定条件】\n后台秘密\n【结局】\n公开结局'
+        self.assertEqual(judge.public_answer_from_full_answer(answer), '【完整汤底】\n正文\n【结局】\n公开结局')
+        answer = '# 真相\n正文\n## 裁判专用配置\n后台\n### 内部检查\n秘密\n## 后记\n公开后记'
+        self.assertEqual(judge.public_answer_from_full_answer(answer), '# 真相\n正文\n## 后记\n公开后记')
+        answer = '正文\n【专属提示线索池】\n**仅供裁判阅读**\n私密线索\n【结局】\n公开结局'
+        self.assertEqual(judge.public_answer_from_full_answer(answer), '正文\n【结局】\n公开结局')
+        self.assertEqual(judge.public_answer_from_full_answer('正文\n【隐藏后台设定】秘密'), '正文')
+
+
+class JudgeResilienceTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        db_patch = patch.object(database_stub, "DB_PATH", Path(temp.name) / "calls.db", create=True)
+        db_patch.start()
+        self.addCleanup(db_patch.stop)
+        judge.reset_fail_counts()
+        judge._config_locks.clear()
+        judge._rr_index = {pool: {} for pool in judge.POOL_NAMES}
+        judge._rr_locks = {
+            pool: asyncio.Lock() for pool in judge.POOL_NAMES
+        }
+        FakeClient.outcomes = []
+        FakeClient.timeouts = []
+        FakeClient.payloads = []
+        FakeClient.urls = []
+        self.clock = 1_000.0
+        self.now_patcher = patch.object(judge, "_now", side_effect=lambda: self.clock)
+        self.now_patcher.start()
+        self.addCleanup(self.now_patcher.stop)
+
+    async def _chat_with(self, outcome, **kwargs):
+        return await self._chat_with_configs([dict(CONFIG)], [outcome], **kwargs)
+
+    async def _chat_with_configs(self, configs, outcomes, **kwargs):
+        FakeClient.outcomes.extend(outcomes)
+        with (
+            patch.object(judge, "fetch_all", AsyncMock(return_value=configs)),
+            patch.object(judge.httpx, "AsyncClient", FakeClient),
+        ):
+            return await judge._chat(MESSAGES, **kwargs)
+
+    async def test_three_failures_cool_then_half_open_success_recovers(self):
+        for expected_failures in (1, 2, 3):
+            with self.assertRaises(HTTPException):
+                await self._chat_with(response(503))
+            status = judge.get_config_runtime_status(CONFIG["id"])
+            self.assertEqual(status["consecutive_failures"], expected_failures)
+            if expected_failures < 3:
+                self.assertEqual(status["runtime_status"], "healthy")
+                self.assertEqual(status["cooldown_remaining_seconds"], 0)
+
+        status = judge.get_config_runtime_status(CONFIG["id"])
+        self.assertEqual(status["runtime_status"], "cooling")
+        self.assertEqual(status["cooldown_remaining_seconds"], 60)
+        self.assertTrue(status["last_error"].startswith("http_5xx: HTTP 503"))
+
+        self.clock += 60
+        self.assertEqual(
+            judge.get_config_runtime_status(CONFIG["id"])["runtime_status"],
+            "half_open",
+        )
+        result = await self._chat_with(response(200, content="recovered"))
+        self.assertEqual(result, "recovered")
+
+        status = judge.get_config_runtime_status(CONFIG["id"])
+        self.assertEqual(status["runtime_status"], "healthy")
+        self.assertEqual(status["consecutive_failures"], 0)
+        self.assertEqual(status["cooldown_remaining_seconds"], 0)
+        self.assertIsNone(status["last_error"])
+        self.assertIsNotNone(status["last_success_at"])
+
+    async def test_half_open_failures_advance_through_ladder_and_cap_at_two_hours(self):
+        self.assertEqual(
+            judge.COOLDOWN_SECONDS,
+            (60, 120, 300, 600, 1800, 3600, 7200),
+        )
+        state = judge._state(CONFIG["id"])
+        state.consecutive_failures = 3
+        state.cooldown_stage = 0
+        state.cooldown_until = self.clock
+
+        for expected_seconds in judge.COOLDOWN_SECONDS[1:]:
+            with self.assertRaises(HTTPException):
+                await self._chat_with(httpx.ReadTimeout("slow"))
+            status = judge.get_config_runtime_status(CONFIG["id"])
+            self.assertEqual(
+                status["cooldown_remaining_seconds"], expected_seconds
+            )
+            self.assertTrue(
+                status["last_error"].startswith("timeout: ReadTimeout")
+            )
+            self.clock += expected_seconds
+
+        with self.assertRaises(HTTPException):
+            await self._chat_with(httpx.ConnectError("offline"))
+        status = judge.get_config_runtime_status(CONFIG["id"])
+        self.assertEqual(status["cooldown_remaining_seconds"], 7200)
+        self.assertEqual(judge._state(CONFIG["id"]).cooldown_stage, 6)
+        self.assertTrue(status["last_error"].startswith("connect: ConnectError"))
+
+    async def test_429_cools_immediately_and_honors_longer_retry_after(self):
+        for retry_after, expected_seconds in (
+            (None, 30),
+            ("10", 30),
+            ("30", 30),
+            ("240", 240),
+            ("9000", 9000),
+            ("invalid", 30),
+            ("Thu, 01 Jan 1970 00:20:40 GMT", 240),
+        ):
+            with self.subTest(retry_after=retry_after):
+                judge.reset_fail_counts(CONFIG["id"])
+                headers = {} if retry_after is None else {"Retry-After": retry_after}
+                with patch.object(judge.time, "time", return_value=1_000):
+                    with self.assertRaises(HTTPException):
+                        await self._chat_with(response(429, headers=headers))
+
+                status = judge.get_config_runtime_status(CONFIG["id"])
+                self.assertEqual(status["runtime_status"], "cooling")
+                self.assertEqual(status["consecutive_failures"], 1)
+                self.assertEqual(status["cooldown_remaining_seconds"], expected_seconds)
+                self.assertTrue(status["last_error"].startswith("429: HTTP 429"))
+
+    async def test_429_cooldown_grows_caps_and_resets_after_success(self):
+        for expected_seconds in (30, 60, 120, 300, 600, 1800, 3600, 7200, 7200):
+            with self.subTest(expected_seconds=expected_seconds):
+                with self.assertRaises(HTTPException):
+                    await self._chat_with(response(429))
+                status = judge.get_config_runtime_status(CONFIG["id"])
+                self.assertEqual(status["runtime_status"], "cooling")
+                self.assertEqual(status["cooldown_remaining_seconds"], expected_seconds)
+                self.clock += expected_seconds
+
+        self.assertEqual(await self._chat_with(response(200)), "ok")
+        self.assertEqual(
+            judge.get_config_runtime_status(CONFIG["id"])["runtime_status"], "healthy"
+        )
+        with self.assertRaises(HTTPException):
+            await self._chat_with(response(429))
+        self.assertEqual(
+            judge.get_config_runtime_status(CONFIG["id"])["cooldown_remaining_seconds"],
+            30,
+        )
+
+    async def test_429_health_is_independent_between_models_on_same_credential(self):
+        model_a = {
+            **CONFIG,
+            "id": 71,
+            "name": "model-a",
+            "model": "provider-model-a",
+        }
+        model_b = {
+            **CONFIG,
+            "id": 72,
+            "name": "model-b",
+            "model": "provider-model-b",
+        }
+
+        result = await self._chat_with_configs(
+            [model_a, model_b],
+            [
+                response(429, headers={"Retry-After": "240"}),
+                response(200, content="gemini-3-ok"),
+            ],
+        )
+
+        self.assertEqual(result, "gemini-3-ok")
+        self.assertEqual(
+            [payload["model"] for payload in FakeClient.payloads],
+            ["provider-model-a", "provider-model-b"],
+        )
+        self.assertEqual(
+            judge.get_config_runtime_status(model_a["id"])["runtime_status"],
+            "cooling",
+        )
+        self.assertEqual(
+            judge.get_config_runtime_status(model_a["id"])[
+                "cooldown_remaining_seconds"
+            ],
+            240,
+        )
+        self.assertEqual(
+            judge.get_config_runtime_status(model_b["id"])["runtime_status"],
+            "healthy",
+        )
+
+    async def test_tarot_public_status_reads_shared_health_without_claim_or_request(self):
+        tarot = {**CONFIG, "id": 73, "purpose": "tarot", "model": "flash-lite"}
+        soup = {**tarot, "id": 74, "purpose": "both"}
+        for row in (tarot, soup):
+            judge.register_config_runtime_node(row)
+        judge._record_failure(soup["id"], httpx.HTTPStatusError(
+            "limited", request=response(429).request,
+            response=response(429, headers={"Retry-After": "240"})), was_probe=False)
+        claim = Mock(side_effect=AssertionError("status must not claim a probe"))
+        with (
+            patch.object(judge, "fetch_all", AsyncMock(return_value=[tarot, soup])),
+            patch.object(judge, "_claim_attempt", claim),
+            patch.object(judge.httpx, "AsyncClient", side_effect=AssertionError("no upstream")),
+        ):
+            current = await judge.get_tarot_model_runtime_statuses()
+            self.clock += 240
+            retry = await judge.get_tarot_model_runtime_statuses()
+            judge._state(soup["id"]).probe_in_flight = True
+            probing = await judge.get_tarot_model_runtime_statuses()
+        self.assertEqual(current, {"models": [{"model": "auto", "status": "cooling", "remaining_seconds": 240}]})
+        self.assertEqual(retry["models"][0]["status"], "retry_ready")
+        self.assertEqual(probing["models"][0]["status"], "probing")
+        claim.assert_not_called()
+        for rows, expected in (([], "unconfigured"), ([{**tarot, "enabled": 0}], "disabled"),
+                               ([tarot, {**tarot, "id": 75, "model": "fallback"}], "available")):
+            with patch.object(judge, "fetch_all", AsyncMock(return_value=rows)):
+                status = await judge.get_tarot_model_runtime_statuses()
+            self.assertEqual(status["models"][0]["status"], expected)
+
+    async def test_only_one_request_can_use_a_half_open_probe(self):
+        state = judge._state(CONFIG["id"])
+        state.consecutive_failures = 3
+        state.cooldown_stage = 0
+        state.cooldown_until = self.clock
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        class BlockingClient:
+            def __init__(self, *, timeout):
+                del timeout
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args):
+                return None
+
+            async def post(self, _url, *, headers, json):
+                del headers, json
+                started.set()
+                await release.wait()
+                return response(200, content="probe-ok")
+
+        with (
+            patch.object(judge, "fetch_all", AsyncMock(return_value=[dict(CONFIG)])),
+            patch.object(judge.httpx, "AsyncClient", BlockingClient),
+        ):
+            first = asyncio.create_task(judge._chat(MESSAGES))
+            await asyncio.wait_for(started.wait(), timeout=1)
+            self.assertTrue(judge._state(CONFIG["id"]).probe_in_flight)
+            with self.assertRaises(HTTPException):
+                await judge._chat(MESSAGES)
+            release.set()
+            self.assertEqual(await first, "probe-ok")
+
+        self.assertEqual(len(FakeClient.payloads), 0)
+        self.assertEqual(
+            judge.get_config_runtime_status(CONFIG["id"])["runtime_status"],
+            "healthy",
+        )
+
+    def test_error_categories_are_stable_for_admin_diagnostics(self):
+        request = httpx.Request("POST", "https://example.test/v1/chat/completions")
+        for status, category in ((400, "http_4xx"), (500, "http_5xx")):
+            exc = httpx.HTTPStatusError(
+                "failed",
+                request=request,
+                response=httpx.Response(status, request=request),
+            )
+            self.assertEqual(judge._classify_error(exc)[0], category)
+        self.assertEqual(judge._classify_error(httpx.ReadTimeout("slow"))[0], "timeout")
+        self.assertEqual(judge._classify_error(httpx.ConnectError("down"))[0], "connect")
+
+    async def test_openrouter_gpt_oss_uses_low_excluded_reasoning(self):
+        cfg = {
+            **CONFIG,
+            "api_url": "https://openrouter.ai/api/v1",
+            "model": "openai/gpt-oss-20b:free",
+        }
+        await self._chat_with_configs([cfg], [response(200)])
+        self.assertEqual(
+            FakeClient.payloads[0]["reasoning"],
+            {"effort": "low", "exclude": True},
+        )
+
+    async def test_groq_gpt_oss_does_not_get_openrouter_reasoning(self):
+        cfg = {
+            **CONFIG,
+            "api_url": "https://api.groq.com/openai/v1",
+            "model": "openai/gpt-oss-120b",
+        }
+        await self._chat_with_configs([cfg], [response(200)])
+        self.assertNotIn("reasoning", FakeClient.payloads[0])
+
+    async def test_openrouter_ordinary_model_has_no_reasoning_override(self):
+        cfg = {
+            **CONFIG,
+            "api_url": "https://openrouter.ai/api/v1",
+            "model": "openai/gpt-4o-mini",
+        }
+        await self._chat_with_configs([cfg], [response(200)])
+        self.assertNotIn("reasoning", FakeClient.payloads[0])
+
+    async def test_official_deepseek_v4_has_30_second_node_hard_limit(self):
+        cfg = {
+            **CONFIG,
+            "api_url": "https://api.deepseek.com/v1",
+            "model": "deepseek-v4-preview",
+        }
+        timeout = judge._request_timeout(cfg, 20)
+        self.assertIsInstance(timeout, httpx.Timeout)
+        self.assertEqual(timeout.connect, 20)
+        self.assertEqual(timeout.write, 20)
+        self.assertEqual(timeout.pool, 20)
+        self.assertEqual(timeout.read, 30)
+        self.assertEqual(judge._request_max_tokens(cfg, 1024), 8192)
+
+        hard_limits = []
+
+        async def passthrough(awaitable, *, timeout):
+            hard_limits.append(timeout)
+            return await awaitable
+
+        with patch.object(judge.asyncio, "wait_for", side_effect=passthrough):
+            result = await self._chat_with_configs([cfg], [response(200, content="ok")])
+        self.assertEqual(result, "ok")
+        self.assertEqual(hard_limits, [30])
+
+        other = {**cfg, "api_url": "https://relay.example/v1"}
+        self.assertEqual(judge._request_timeout(other, 20), 20)
+        self.assertEqual(judge._request_max_tokens(other, 1024), 1024)
+
+    async def test_deepseek_timeout_continues_to_next_available_node(self):
+        deepseek = {
+            **CONFIG,
+            "id": 1,
+            "name": "deepseek",
+            "api_url": "https://api.deepseek.com/v1",
+            "model": "deepseek-v4-preview",
+            "priority": 0,
+        }
+        fallback = {
+            **CONFIG,
+            "id": 2,
+            "name": "fallback",
+            "api_url": "https://fallback.example/v1",
+            "priority": 10,
+        }
+        result = await self._chat_with_configs(
+            [fallback, deepseek],
+            [httpx.ReadTimeout("deepseek slow"), response(200, content="fallback-ok")],
+        )
+        self.assertEqual(result, "fallback-ok")
+        self.assertEqual(
+            FakeClient.urls,
+            [
+                "https://api.deepseek.com/v1/chat/completions",
+                "https://fallback.example/v1/chat/completions",
+            ],
+        )
+
+    async def test_busy_is_returned_only_after_every_available_node_fails(self):
+        configs = [
+            {**CONFIG, "id": 1, "api_url": "https://first.example/v1", "priority": 0},
+            {**CONFIG, "id": 2, "api_url": "https://second.example/v1", "priority": 5},
+        ]
+        with self.assertRaises(HTTPException) as caught:
+            await self._chat_with_configs(
+                configs,
+                [httpx.ReadTimeout("slow"), response(503)],
+            )
+        self.assertEqual(caught.exception.status_code, 503)
+        self.assertEqual(len(FakeClient.urls), 2)
+
+    async def test_priority_layers_round_robin_without_using_healthy_fallback(self):
+        primary_a = {
+            **CONFIG,
+            "id": 1,
+            "name": "primary-a",
+            "api_url": "https://primary-a.example/v1",
+            "priority": 0,
+        }
+        primary_b = {
+            **CONFIG,
+            "id": 2,
+            "name": "primary-b",
+            "api_url": "https://primary-b.example/v1",
+            "priority": 0,
+        }
+        fallback = {
+            **CONFIG,
+            "id": 3,
+            "name": "fallback",
+            "api_url": "https://fallback.example/v1",
+            "priority": 10,
+        }
+        configs = [fallback, primary_b, primary_a]
+        for content in ("one", "two", "three"):
+            self.assertEqual(
+                await self._chat_with_configs(configs, [response(200, content=content)]),
+                content,
+            )
+        self.assertEqual(
+            FakeClient.urls,
+            [
+                "https://primary-a.example/v1/chat/completions",
+                "https://primary-b.example/v1/chat/completions",
+                "https://primary-a.example/v1/chat/completions",
+            ],
+        )
+
+    async def test_priority_layer_is_exhausted_before_fallback(self):
+        configs = [
+            {**CONFIG, "id": 1, "api_url": "https://primary-a.example/v1", "priority": 0},
+            {**CONFIG, "id": 2, "api_url": "https://primary-b.example/v1", "priority": 0},
+            {**CONFIG, "id": 3, "api_url": "https://fallback.example/v1", "priority": 10},
+        ]
+        result = await self._chat_with_configs(
+            configs,
+            [response(503), response(400), response(200, content="fallback")],
+        )
+        self.assertEqual(result, "fallback")
+        self.assertEqual(
+            FakeClient.urls,
+            [
+                "https://primary-a.example/v1/chat/completions",
+                "https://primary-b.example/v1/chat/completions",
+                "https://fallback.example/v1/chat/completions",
+            ],
+        )
+
+    async def test_cooling_primary_layer_uses_next_priority_layer(self):
+        state = judge._state(1)
+        state.consecutive_failures = 3
+        state.cooldown_stage = 0
+        state.cooldown_until = self.clock + 60
+        configs = [
+            {**CONFIG, "id": 1, "api_url": "https://primary.example/v1", "priority": 0},
+            {**CONFIG, "id": 2, "api_url": "https://fallback.example/v1", "priority": 10},
+        ]
+        result = await self._chat_with_configs(
+            configs,
+            [response(200, content="fallback")],
+        )
+        self.assertEqual(result, "fallback")
+        self.assertEqual(
+            FakeClient.urls,
+            ["https://fallback.example/v1/chat/completions"],
+        )
+
+
+class AdminApiConfigRuntimeTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        judge.reset_fail_counts()
+
+    async def test_draft_accounting_keeps_id_only_for_same_channel(self):
+        for override, expected_id in [({}, CONFIG["id"]), ({"api_url": "https://other.test/v1"}, 0),
+                                      ({"api_key": "another-test-key"}, 0)]:
+            body = admin_router.ApiTestBody(config_id=CONFIG["id"], **override)
+            test = AsyncMock(return_value={"success": False})
+            with patch.object(admin_router, "fetch_one", AsyncMock(return_value=CONFIG)), \
+                 patch.object(admin_router, "test_config", test):
+                await admin_router.test_api_config_draft(body, admin={"id": 1})
+            self.assertEqual(test.call_args.args[0]["id"], expected_id)
+
+    async def test_api_configs_masks_key_and_adds_runtime_fields(self):
+        rows = [
+            {
+                **CONFIG,
+                "api_key": "sk-this-must-not-leak",
+                "created_at": "2026-08-11 12:00:00",
+            }
+        ]
+        runtime = {
+            "runtime_status": "cooling",
+            "consecutive_failures": 3,
+            "cooldown_remaining_seconds": 42,
+            "last_error": "timeout: ReadTimeout",
+            "last_success_at": "2026-08-11T11:59:00+08:00",
+        }
+        with (
+            patch.object(admin_router, "fetch_all", AsyncMock(return_value=rows)),
+            patch.object(admin_router, "get_config_runtime_status", return_value=runtime),
+        ):
+            result = await admin_router.api_configs(admin={"id": 1})
+
+        self.assertNotIn("sk-this-must-not-leak", str(result))
+        self.assertEqual(result[0]["api_key"], "sk-t...leak")
+        for field, expected in runtime.items():
+            self.assertEqual(result[0][field], expected)
+
+    def test_disabled_status_does_not_change_persisted_enabled_value(self):
+        runtime = judge.get_config_runtime_status(CONFIG["id"], enabled=False)
+        self.assertEqual(runtime["runtime_status"], "disabled")
+        self.assertEqual(CONFIG["enabled"], 1)
+
+
+class NpcPoolTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        db_patch = patch.object(database_stub, "DB_PATH", Path(temp.name) / "calls.db", create=True)
+        db_patch.start()
+        self.addCleanup(db_patch.stop)
+        judge.reset_fail_counts()
+        judge._config_locks.clear()
+        judge._rr_index = {pool: {} for pool in judge.POOL_NAMES}
+        judge._rr_locks = {
+            pool: asyncio.Lock() for pool in judge.POOL_NAMES
+        }
+        judge._npc_semaphore = None
+        judge._npc_semaphore_loop = None
+        judge._tarot_semaphore = None
+        judge._tarot_semaphore_loop = None
+        judge._npc_active = 0
+        judge._npc_waiting = 0
+        judge._priority_waiters = 0
+        FakeClient.outcomes = []
+        FakeClient.timeouts = []
+        FakeClient.payloads = []
+        FakeClient.urls = []
+
+    def test_purpose_matching_preserves_both_and_adds_explicit_all(self):
+        self.assertTrue(judge._purpose_matches("judge", "judge"))
+        self.assertTrue(judge._purpose_matches("hint", "hint"))
+        self.assertTrue(judge._purpose_matches("npc", "npc"))
+        self.assertTrue(judge._purpose_matches("npc", "npc_decision"))
+        self.assertTrue(judge._purpose_matches("npc", "npc_speech"))
+        self.assertTrue(
+            judge._purpose_matches("npc_decision", "npc_decision")
+        )
+        self.assertTrue(judge._purpose_matches("npc_speech", "npc_speech"))
+        self.assertFalse(
+            judge._purpose_matches("npc_decision", "npc_speech")
+        )
+        self.assertTrue(judge._purpose_matches("both", "judge"))
+        self.assertTrue(judge._purpose_matches("both", "hint"))
+        self.assertFalse(judge._purpose_matches("both", "npc_decision"))
+        self.assertFalse(judge._purpose_matches("both", "npc_speech"))
+        self.assertTrue(all(
+            judge._purpose_matches("all", pool)
+            for pool in judge.SOUP_DUEL_POOL_NAMES
+        ))
+        self.assertFalse(judge._purpose_matches("all", "tarot"))
+        self.assertTrue(judge._purpose_matches("tarot", "tarot"))
+        self.assertFalse(judge._purpose_matches("tarot", "judge"))
+        self.assertFalse(judge._purpose_matches("tarot", "npc_decision"))
+        self.assertEqual(admin_router.normalize_api_config_purpose("npc"), "npc")
+        self.assertEqual(
+            admin_router.normalize_api_config_purpose("npc_decision"),
+            "npc_decision",
+        )
+        self.assertEqual(
+            admin_router.normalize_api_config_purpose("npc_speech"),
+            "npc_speech",
+        )
+        self.assertEqual(admin_router.normalize_api_config_purpose("all"), "all")
+        self.assertEqual(
+            admin_router.normalize_api_config_purpose("tarot"), "tarot"
+        )
+
+    def test_flash_configs_are_routed_by_purpose_not_model_name(self):
+        for model in ("gemini-3.5-flash", "gemini-3.8-flash", "gcli-gemini-3.8-flash"):
+            with self.subTest(model=model):
+                both = {**CONFIG, "id": 5, "purpose": "both", "model": model}
+                npc = {**CONFIG, "id": 15, "purpose": "npc", "model": model}
+                tarot = {**CONFIG, "id": 19, "purpose": "tarot", "model": model}
+                rows = [tarot, both, npc]
+                for pool in ("judge", "hint"):
+                    self.assertEqual(judge._select_configs_for_pool(rows, pool), [both])
+                for pool in judge.NPC_POOL_NAMES:
+                    self.assertEqual(judge._select_configs_for_pool(rows, pool), [npc])
+                self.assertEqual(judge._select_configs_for_pool([both, npc], "tarot"), [])
+                self.assertEqual(
+                    judge._select_configs_for_pool(rows, "tarot"),
+                    [tarot],
+                )
+
+    async def test_flash_routing_tries_gg_before_sakura_by_priority(self):
+        for pool in judge.SOUP_DUEL_POOL_NAMES:
+            with self.subTest(pool=pool):
+                judge.reset_fail_counts()
+                purpose = "npc" if pool in judge.NPC_POOL_NAMES else "both"
+                gg = {**CONFIG, "id": 5, "purpose": purpose, "priority": 1,
+                      "api_url": "https://gg.test/v1", "model": "gemini-3.8-flash"}
+                sakura = {**CONFIG, "id": 4, "purpose": purpose, "priority": 2,
+                          "api_url": "https://sakura.test/v1", "model": "gcli-gemini-3.8-flash"}
+                FakeClient.urls = []
+                FakeClient.outcomes = [response(503), response(200)]
+                with (
+                    patch.object(judge, "fetch_all", AsyncMock(return_value=[sakura, gg])),
+                    patch.object(judge.httpx, "AsyncClient", FakeClient),
+                ):
+                    self.assertEqual(await judge._chat(MESSAGES, pool=pool), "ok")
+                self.assertEqual(FakeClient.urls, [
+                    "https://gg.test/v1/chat/completions",
+                    "https://sakura.test/v1/chat/completions",
+                ])
+
+    def test_tarot_pool_is_purpose_only_and_deduplicates_nodes(self):
+        tarot = {
+            **CONFIG,
+            "id": 54,
+            "purpose": "tarot",
+            "model": judge.TAROT_FLASH_MODEL,
+        }
+        pro = {
+            **CONFIG,
+            "id": 57,
+            "purpose": "tarot",
+            "model": judge.TAROT_PRO_MODEL,
+        }
+        unapproved_tarot = {
+            **CONFIG,
+            "id": 58,
+            "purpose": "tarot",
+            "model": "gcli-gemini-3.5-flash-preview",
+        }
+        ordinary = {
+            **CONFIG,
+            "id": 55,
+            "purpose": "all",
+            "model": "gemini-3-flash-preview",
+        }
+        duplicate_tarot = {
+            **tarot,
+            "id": 56,
+            "name": "duplicate tarot row",
+        }
+        self.assertEqual(
+            judge._select_configs_for_pool(
+                [ordinary, tarot, pro, unapproved_tarot, duplicate_tarot], "tarot"
+            ),
+            [tarot, pro, unapproved_tarot],
+        )
+        self.assertEqual(
+            judge._select_configs_for_pool(
+                [tarot, pro], "tarot", model=judge.TAROT_PRO_MODEL
+            ),
+            [tarot, pro],
+        )
+        self.assertEqual(
+            judge._select_configs_for_pool([ordinary, tarot], "judge"),
+            [ordinary],
+        )
+
+    async def test_tarot_aliases_use_priority_fallback_disabled_filter_and_deduplication(self):
+        models = ["gemini-3.8-flash", "[反重力次]gemini-3.1-flash-lite", "[aistudio2]gemini-3.7-flash"]
+        rows = [{**CONFIG, "id": 81+i, "name": str(i), "purpose": "tarot",
+                 "model": model, "priority": i, "api_url": f"https://channel{i}.test/v1"}
+                for i, model in enumerate(models)]
+        disabled = {**rows[0], "id": 90, "model": "disabled-model", "priority": -1, "enabled": 0}
+        duplicate = {**rows[0], "id": 91, "priority": 9}
+        for alias in judge.TAROT_ALLOWED_MODELS:
+            with self.subTest(alias=alias):
+                judge.reset_fail_counts()
+                FakeClient.payloads = []
+                FakeClient.outcomes = [response(503), response(429), response(200, content="reading")]
+                with (
+                    patch.object(judge, "fetch_all", AsyncMock(return_value=[duplicate, rows[2], disabled, rows[1], rows[0]])),
+                    patch.object(judge.httpx, "AsyncClient", FakeClient),
+                ):
+                    result = await judge.tarot_reading_chat(MESSAGES, model=alias, timeout=20)
+                self.assertEqual(result, {"content": "reading", "model": models[2]})
+                self.assertEqual([p["model"] for p in FakeClient.payloads], models)
+
+    async def test_empty_tarot_pool_never_borrows_other_purposes_or_arbitrary_models(self):
+        for alias in ("auto", judge.TAROT_PRO_MODEL):
+            with (
+                patch.object(judge, "fetch_all", AsyncMock(return_value=[CONFIG])),
+                patch.object(judge.httpx, "AsyncClient", FakeClient),
+                self.assertRaises(HTTPException) as raised,
+            ):
+                await judge.tarot_reading_chat(MESSAGES, model=alias, timeout=20)
+            self.assertEqual(raised.exception.status_code, 503)
+            self.assertIn("通道未配置", raised.exception.detail)
+        with self.assertRaises(ValueError):
+            await judge.tarot_reading_chat(MESSAGES, model="https://attacker.test")
+        self.assertEqual(FakeClient.payloads, [])
+
+    def test_tarot_model_node_is_unique_but_other_models_may_share_credential(self):
+        soup_other_model = {
+            **CONFIG,
+            "id": 56,
+            "purpose": "judge",
+            "api_url": "https://provider.test/v1",
+            "api_key": "shared-secret",
+            "model": "gemini-3-flash-preview",
+        }
+        tarot = {
+            **CONFIG,
+            "id": 57,
+            "purpose": "tarot",
+            "api_url": "https://provider.test/v1/chat/completions",
+            "api_key": "shared-secret",
+            "model": "gemini-3.5-flash",
+        }
+        same_model_soup = {
+            **soup_other_model,
+            "id": 58,
+            "model": "gemini-3.5-flash",
+        }
+        self.assertIsNone(
+            admin_router.tarot_model_node_conflict([soup_other_model], tarot)
+        )
+        self.assertIsNone(
+            admin_router.tarot_model_node_conflict([same_model_soup], tarot)
+        )
+        self.assertIs(
+            admin_router.tarot_model_node_conflict(
+                [tarot], {**tarot, "id": 59}
+            ),
+            tarot,
+        )
+        self.assertIsNone(
+            admin_router.tarot_model_node_conflict(
+                [{**tarot, "enabled": 0}], tarot
+            )
+        )
+
+    async def test_admin_allows_flash_for_non_tarot_purposes_on_create_and_update(self):
+        for model in ("gemini-3.5-flash", "gemini-3.8-flash", "gcli-gemini-3.8-flash"):
+            for purpose in ("judge", "hint", "both", "npc", "npc_decision", "npc_speech", "all"):
+                with self.subTest(model=model, purpose=purpose):
+                    # The same model name on a different Tarot endpoint is fine.
+                    tarot = {**CONFIG, "id": 19, "purpose": "tarot", "model": model,
+                             "api_url": "https://tarot.test/v1"}
+                    body = admin_router.ApiConfigBody(
+                        name="ordinary flash", api_url=CONFIG["api_url"],
+                        api_key=CONFIG["api_key"], model=model,
+                        purpose=purpose, enabled=1, priority=1,
+                    )
+                    execute = AsyncMock(return_value=59)
+                    with (
+                        patch.object(admin_router, "fetch_all", AsyncMock(return_value=[tarot, CONFIG])),
+                        patch.object(admin_router, "fetch_one", AsyncMock(return_value=CONFIG)),
+                        patch.object(admin_router, "execute", execute),
+                    ):
+                        self.assertEqual(await admin_router.add_api_config(body, admin={"id": 1}), {"id": 59})
+                        self.assertEqual(await admin_router.update_api_config(CONFIG["id"], body, admin={"id": 1}), {"ok": True})
+                    self.assertEqual(execute.await_count, 2)
+
+    async def test_admin_allows_same_node_across_tarot_and_other_purposes(self):
+        existing = {
+            **CONFIG,
+            "id": 60,
+            "name": "existing gg",
+            "purpose": "both",
+            "model": "gemini-3.5-flash",
+            "enabled": 1,
+        }
+        body = admin_router.ApiConfigBody(
+            name="tarot gemini 3.5",
+            api_url=CONFIG["api_url"],
+            api_key=CONFIG["api_key"],
+            model="gemini-3.5-flash",
+            purpose="tarot",
+            enabled=1,
+            priority=0,
+        )
+        execute = AsyncMock(return_value=61)
+        with (
+            patch.object(
+                admin_router, "fetch_all", AsyncMock(return_value=[existing])
+            ),
+            patch.object(admin_router, "execute", execute),
+        ):
+            result = await admin_router.add_api_config(body, admin={"id": 1})
+
+        self.assertEqual(result, {"id": 61})
+        execute.assert_awaited_once()
+
+    async def test_admin_still_rejects_duplicate_tarot_node(self):
+        for model in judge.TAROT_ALLOWED_MODELS:
+            existing = {**CONFIG, "id": 19, "model": model, "purpose": "tarot"}
+            for purpose in ("tarot",):
+                with self.subTest(model=model, purpose=purpose):
+                    with (
+                        patch.object(admin_router, "fetch_all", AsyncMock(return_value=[existing])),
+                        self.assertRaises(HTTPException) as raised,
+                    ):
+                        await admin_router.require_api_config_assignment({**existing, "purpose": purpose})
+                    self.assertEqual(raised.exception.status_code, 409)
+
+    async def test_tarot_alias_shares_physical_lock_and_has_independent_capacity(self):
+        soup = {**CONFIG, "id": 101, "model": "same-model"}
+        tarot = {**soup, "id": 102, "purpose": "tarot"}
+        npc = {**soup, "id": 103, "purpose": "npc"}
+        for cfg in (soup, tarot, npc):
+            judge.register_config_runtime_node(cfg)
+        self.assertIs(judge._config_lock(soup), judge._config_lock(tarot))
+        self.assertIs(judge._config_lock(npc), judge._config_lock(tarot))
+        started, release = asyncio.Event(), asyncio.Event()
+        calls = []
+
+        async def post(cfg, payload, timeout, **kwargs):
+            calls.append(cfg["id"])
+            started.set()
+            await release.wait()
+            return response(200)
+
+        with (
+            patch.object(judge, "TAROT_API_MAX_CONCURRENCY", 1),
+            patch.object(judge, "TAROT_API_QUEUE_TIMEOUT_SECONDS", 0.01),
+            patch.object(judge, "fetch_all", AsyncMock(return_value=[soup, tarot, npc])),
+            patch.object(judge, "_post_chat_completion", post),
+        ):
+            first = asyncio.create_task(judge._chat(MESSAGES, pool="judge"))
+            await asyncio.wait_for(started.wait(), 1)
+            second = asyncio.create_task(judge.tarot_reading_chat(MESSAGES))
+            try:
+                for _ in range(20):
+                    if judge._tarot_active:
+                        break
+                    await asyncio.sleep(0)
+                self.assertEqual(judge._tarot_active, 1)
+                self.assertEqual(judge._npc_active, 0)
+                self.assertEqual(calls, [soup["id"]])
+                with self.assertRaises(HTTPException) as overflow:
+                    await judge.tarot_reading_chat(MESSAGES)
+                self.assertEqual(overflow.exception.status_code, 503)
+            finally:
+                release.set()
+                results = await asyncio.gather(first, second)
+            self.assertEqual(results, ["ok", {"content": "ok", "model": "same-model"}])
+            self.assertEqual(calls, [soup["id"], tarot["id"]])
+            self.assertEqual(judge._tarot_active, 0)
+            self.assertEqual(judge._tarot_waiting, 0)
+
+    async def test_admin_configuration_keeps_real_tarot_model_and_channel_names(self):
+        rows = [{**CONFIG, "id": 201+i, "purpose": "tarot", "name": name, "model": model}
+                for i, (name, model) in enumerate((
+                    ("空悲切", "[反重力次]gemini-3.1-flash-lite"),
+                    ("沉默", "[aistudio2]gemini-3.7-flash"))) ]
+        expected = [(row["name"], row["model"]) for row in rows]
+        with patch.object(admin_router, "fetch_all", AsyncMock(return_value=rows)):
+            result = await admin_router.api_configs(admin={"id": 1})
+        self.assertEqual([(row["name"], row["model"]) for row in result], expected)
+
+    async def test_admin_can_create_and_update_three_tarot_channels_with_existing_aliases(self):
+        models = ("gemini-3.8-flash", "[反重力次]gemini-3.1-flash-lite", "[aistudio2]gemini-3.7-flash")
+        for priority, model in enumerate(models):
+            for purpose in ("both", "npc"):
+                existing = {**CONFIG, "model": model, "purpose": purpose}
+                body = admin_router.ApiConfigBody(
+                    name="tarot", api_url=CONFIG["api_url"], api_key=CONFIG["api_key"],
+                    model=model, purpose="tarot", enabled=1, priority=priority)
+                execute = AsyncMock(return_value=105)
+                with (
+                    patch.object(admin_router, "fetch_all", AsyncMock(return_value=[existing])),
+                    patch.object(admin_router, "fetch_one", AsyncMock(return_value={**existing, "id": 105})),
+                    patch.object(admin_router, "execute", execute),
+                ):
+                    await admin_router.add_api_config(body, admin={"id": 1})
+                    await admin_router.update_api_config(105, body, admin={"id": 1})
+                self.assertEqual(execute.await_count, 2)
+                # Validation also allows a soup/NPC assignment when Tarot exists first.
+                self.assertIsNone(admin_router.tarot_model_node_conflict(
+                    [{**existing, "purpose": "tarot"}], existing))
+
+    async def test_tarot_does_not_join_soup_priority_waiter_signal(self):
+        observed = []
+
+        async def inspect_waiters(*_args, **_kwargs):
+            observed.append(judge._priority_waiters)
+            return "ok"
+
+        with patch.object(judge, "_chat_from_pool", side_effect=inspect_waiters):
+            self.assertEqual(await judge._chat(MESSAGES, pool="tarot"), "ok")
+            self.assertEqual(await judge._chat(MESSAGES, pool="judge"), "ok")
+
+        self.assertEqual(observed, [0, 1])
+        self.assertEqual(judge._priority_waiters, 0)
+
+    def test_all_covers_both_npc_tasks_but_exact_purpose_stays_preferred(self):
+        all_config = {**CONFIG, "id": 39, "purpose": "all"}
+        decision_config = {**CONFIG, "id": 40, "purpose": "npc_decision"}
+        legacy_config = {**CONFIG, "id": 41, "purpose": "npc"}
+        rows = [all_config, decision_config, legacy_config]
+        self.assertEqual(
+            judge._select_configs_for_pool(rows, "npc_decision"),
+            [decision_config],
+        )
+        self.assertEqual(
+            judge._select_configs_for_pool(rows, "npc_speech"),
+            [all_config],
+        )
+
+    async def test_decision_prefers_dedicated_while_speech_falls_back_to_legacy(self):
+        configs = [
+            {
+                **CONFIG,
+                "id": 41,
+                "name": "decision",
+                "purpose": "npc_decision",
+                "api_url": "https://decision.test/v1",
+            },
+            {
+                **CONFIG,
+                "id": 42,
+                "name": "legacy",
+                "purpose": "npc",
+                "api_url": "https://legacy.test/v1",
+            },
+        ]
+        FakeClient.outcomes = [
+            response(200, content="decision-result"),
+            response(200, content="speech-result"),
+        ]
+        with (
+            patch.object(judge, "fetch_all", AsyncMock(return_value=configs)),
+            patch.object(judge.httpx, "AsyncClient", FakeClient),
+        ):
+            self.assertEqual(
+                await judge.npc_decision_chat(MESSAGES), "decision-result"
+            )
+            self.assertEqual(
+                await judge.npc_speech_chat(MESSAGES), "speech-result"
+            )
+        self.assertEqual(
+            FakeClient.urls,
+            [
+                "https://decision.test/v1/chat/completions",
+                "https://legacy.test/v1/chat/completions",
+            ],
+        )
+
+    async def test_only_legacy_npc_config_still_serves_both_tasks(self):
+        legacy = {
+            **CONFIG,
+            "id": 43,
+            "purpose": "npc",
+            "api_url": "https://legacy-only.test/v1",
+        }
+        FakeClient.outcomes = [
+            response(200, content="decision-result"),
+            response(200, content="speech-result"),
+        ]
+        with (
+            patch.object(judge, "fetch_all", AsyncMock(return_value=[legacy])),
+            patch.object(judge.httpx, "AsyncClient", FakeClient),
+        ):
+            self.assertEqual(
+                await judge.npc_decision_chat(MESSAGES), "decision-result"
+            )
+            self.assertEqual(
+                await judge.npc_speech_chat(MESSAGES), "speech-result"
+            )
+        self.assertEqual(
+            FakeClient.urls,
+            ["https://legacy-only.test/v1/chat/completions"] * 2,
+        )
+
+    async def test_cooling_dedicated_config_falls_back_to_available_legacy(self):
+        dedicated = {
+            **CONFIG,
+            "id": 44,
+            "purpose": "npc_decision",
+            "api_url": "https://cooling-decision.test/v1",
+        }
+        legacy = {
+            **CONFIG,
+            "id": 45,
+            "purpose": "npc",
+            "api_url": "https://available-legacy.test/v1",
+        }
+        judge.register_config_runtime_node(dedicated)
+        state = judge._state(dedicated["id"])
+        state.cooldown_stage = 0
+        state.cooldown_until = judge._now() + 60
+        FakeClient.outcomes = [response(200, content="legacy-result")]
+        with (
+            patch.object(
+                judge, "fetch_all", AsyncMock(return_value=[dedicated, legacy])
+            ),
+            patch.object(judge.httpx, "AsyncClient", FakeClient),
+        ):
+            self.assertEqual(
+                await judge.npc_decision_chat(MESSAGES), "legacy-result"
+            )
+        self.assertEqual(
+            FakeClient.urls,
+            ["https://available-legacy.test/v1/chat/completions"],
+        )
+
+    async def test_duplicate_rows_with_same_model_share_health_and_lock(self):
+        npc_cfg = {**CONFIG, "id": 1, "purpose": "npc"}
+        judge_cfg = {**CONFIG, "id": 2, "purpose": "judge"}
+        self.assertEqual(
+            judge.register_config_runtime_node(npc_cfg),
+            judge.register_config_runtime_node(judge_cfg),
+        )
+        rate_limited = response(429)
+        with self.assertRaises(httpx.HTTPStatusError) as caught:
+            rate_limited.raise_for_status()
+        judge._record_failure(1, caught.exception, was_probe=False)
+        self.assertEqual(
+            judge.get_config_runtime_status(2)["consecutive_failures"], 1
+        )
+        self.assertEqual(
+            judge.get_config_runtime_status(2)["runtime_status"], "cooling"
+        )
+        self.assertEqual(
+            judge.get_config_runtime_status(2)["cooldown_remaining_seconds"],
+            30,
+        )
+        self.assertIs(judge._config_lock(npc_cfg), judge._config_lock(judge_cfg))
+
+    async def test_different_models_share_credential_lock_but_not_health(self):
+        npc_cfg = {
+            **CONFIG,
+            "id": 3,
+            "purpose": "npc",
+            "model": "provider-model-a",
+        }
+        judge_cfg = {
+            **CONFIG,
+            "id": 4,
+            "purpose": "judge",
+            "model": "provider-model-b",
+        }
+        self.assertNotEqual(
+            judge.register_config_runtime_node(npc_cfg),
+            judge.register_config_runtime_node(judge_cfg),
+        )
+        npc_lock = judge._config_lock(npc_cfg)
+        judge_lock = judge._config_lock(judge_cfg)
+        self.assertIs(npc_lock, judge_lock)
+        async with npc_lock:
+            self.assertTrue(judge_lock.locked())
+
+        judge._record_failure(3, httpx.ReadTimeout("model-specific"), was_probe=False)
+        self.assertEqual(
+            judge.get_config_runtime_status(3)["consecutive_failures"], 1
+        )
+        self.assertEqual(
+            judge.get_config_runtime_status(4)["consecutive_failures"], 0
+        )
+
+    async def test_paid_deepseek_npc_node_is_allowed_without_real_request(self):
+        paid = {
+            **CONFIG,
+            "id": 11,
+            "purpose": "npc",
+            "api_url": "https://api.deepseek.com/v1",
+            "model": "deepseek-chat",
+        }
+        FakeClient.outcomes = [response(200, content="chosen")]
+        with (
+            patch.object(judge, "fetch_all", AsyncMock(return_value=[paid])),
+            patch.object(judge.httpx, "AsyncClient", FakeClient),
+        ):
+            result = await judge.npc_chat(
+                [{"role": "user", "content": " compact "}],
+                max_tokens=64,
+                timeout=5,
+            )
+        self.assertEqual(result, "chosen")
+        self.assertEqual(FakeClient.payloads[0]["messages"], [
+            {"role": "user", "content": "compact"}
+        ])
+        self.assertEqual(FakeClient.payloads[0]["max_tokens"], 64)
+
+    async def test_different_nodes_run_in_parallel_under_global_limit(self):
+        configs = [
+            {**CONFIG, "id": 21, "purpose": "npc", "api_url": "https://a.test/v1"},
+            {**CONFIG, "id": 22, "purpose": "npc", "api_url": "https://b.test/v1"},
+        ]
+        started = asyncio.Event()
+        release = asyncio.Event()
+        active = 0
+        maximum = 0
+
+        class ParallelClient:
+            def __init__(self, *, timeout):
+                del timeout
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args):
+                return None
+
+            async def post(self, _url, *, headers, json):
+                nonlocal active, maximum
+                del headers, json
+                active += 1
+                maximum = max(maximum, active)
+                if active == 2:
+                    started.set()
+                await release.wait()
+                active -= 1
+                return response(200, content="ok")
+
+        with (
+            patch.object(judge, "fetch_all", AsyncMock(return_value=configs)),
+            patch.object(judge.httpx, "AsyncClient", ParallelClient),
+        ):
+            tasks = [asyncio.create_task(judge.npc_chat(MESSAGES)) for _ in range(2)]
+            await asyncio.wait_for(started.wait(), timeout=1)
+            self.assertEqual(judge.get_pool_runtime_status()["npc"]["active"], 2)
+            release.set()
+            self.assertEqual(await asyncio.gather(*tasks), ["ok", "ok"])
+        self.assertEqual(maximum, 2)
+
+    async def test_configurable_global_npc_limit_rejects_queue_overflow(self):
+        cfg = {**CONFIG, "id": 25, "purpose": "npc"}
+        started = asyncio.Event()
+        release = asyncio.Event()
+        calls = 0
+
+        class LimitedClient:
+            def __init__(self, *, timeout):
+                del timeout
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args):
+                return None
+
+            async def post(self, _url, *, headers, json):
+                nonlocal calls
+                del headers, json
+                calls += 1
+                started.set()
+                await release.wait()
+                return response(200, content="done")
+
+        with (
+            patch.object(judge, "NPC_API_MAX_CONCURRENCY", 1),
+            patch.object(judge, "NPC_API_QUEUE_TIMEOUT_SECONDS", 0.01),
+            patch.object(judge, "fetch_all", AsyncMock(return_value=[cfg])),
+            patch.object(judge.httpx, "AsyncClient", LimitedClient),
+        ):
+            judge._npc_semaphore = None
+            first = asyncio.create_task(judge.npc_chat(MESSAGES))
+            await asyncio.wait_for(started.wait(), timeout=1)
+            with self.assertRaises(HTTPException) as overflow:
+                await judge.npc_chat(MESSAGES)
+            self.assertEqual(overflow.exception.status_code, 503)
+            self.assertEqual(calls, 1)
+            release.set()
+            self.assertEqual(await first, "done")
+
+    async def test_waiting_judge_prevents_new_npc_from_entering_shared_node(self):
+        shared = {**CONFIG, "id": 31, "purpose": "all"}
+        first_started = asyncio.Event()
+        release_first = asyncio.Event()
+        calls = 0
+
+        class PriorityClient:
+            def __init__(self, *, timeout):
+                del timeout
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args):
+                return None
+
+            async def post(self, _url, *, headers, json):
+                nonlocal calls
+                del headers, json
+                calls += 1
+                if calls == 1:
+                    first_started.set()
+                    await release_first.wait()
+                    return response(200, content="npc-first")
+                return response(200, content="judge-next")
+
+        with (
+            patch.object(judge, "fetch_all", AsyncMock(return_value=[shared])),
+            patch.object(judge.httpx, "AsyncClient", PriorityClient),
+        ):
+            first_npc = asyncio.create_task(judge.npc_chat(MESSAGES))
+            await asyncio.wait_for(first_started.wait(), timeout=1)
+            judge_task = asyncio.create_task(judge._chat(MESSAGES, pool="judge"))
+            await asyncio.sleep(0)
+            self.assertGreater(judge.get_pool_runtime_status()["priority_waiters"], 0)
+            with self.assertRaises(HTTPException) as blocked:
+                await judge.npc_chat(MESSAGES)
+            self.assertEqual(blocked.exception.status_code, 503)
+            self.assertEqual(calls, 1)
+            release_first.set()
+            self.assertEqual(await first_npc, "npc-first")
+            self.assertEqual(await judge_task, "judge-next")
+        self.assertEqual(calls, 2)
+
+    async def test_npc_chat_rejects_noncompact_messages_before_scheduling(self):
+        with self.assertRaisesRegex(ValueError, "只能包含"):
+            await judge.npc_chat([
+                {"role": "user", "content": "hello", "viewer": "other"}
+            ])
+        with self.assertRaisesRegex(ValueError, "max_tokens"):
+            await judge.npc_chat(MESSAGES, max_tokens=10000)
+
+    async def test_npc_chat_allows_large_message_content(self):
+        long_message = [{"role": "user", "content": "棋" * 50000}]
+        with patch.object(judge, "_chat", AsyncMock(return_value="ok")) as chat:
+            self.assertEqual(await judge.npc_chat(long_message), "ok")
+        chat.assert_awaited_once()
+        forwarded = chat.await_args.args[0]
+        self.assertEqual(forwarded, long_message)
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)

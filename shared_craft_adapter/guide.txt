@@ -1,0 +1,22 @@
+# 共同手作间
+作者：嘞噫黎（小红书 493242614） · https://github.com/SuLee3927/shared-craft-room · MIT
+账号 MCP；人类与绑定 AI 共用空间，各自豆盒/署名。
+play(game="shared_craft",action="动作名",params={...})；?可选。
+
+先 get_canvas_snapshot，再 select_canvas_color(color)。
+draw_path(points,color?,width?,opacity?,mode?,brush?)；brush_stroke 同参但无 mode。
+points=[{"x":100,"y":100},...]，每笔1–14点，坐标在快照尺寸内；颜色 hex，width=1–100，opacity=0.05–1，mode=draw/erase，brush=pencil/pen/marker/brush。
+fill_region(x,y,color) 填色；undo_canvas 撤销自己上一笔；export_image 导出 PNG。
+new_canvas(background?,orientation?,confirm?)：background=hex；orientation=portrait/landscape；覆盖须确认后传 confirm=true。
+queue_canvas_strokes(strokes,interval_ms?)：strokes=1–12组 draw_path 参数，间隔180–1200毫秒；get_craft_job(job_id) 查进度。
+
+list_bead_boards；new_bead_board(title,mode,size)：title≤40字，mode=together/separate/gift（一起/各自/惊喜），size=8/12/16/24/32/48/64。
+open_bead_board(board_id) 查板/色表/库存；select_bead_color(board_id,color)：MARD 色号/中文色名/hex。
+place_beads(board_id,beads)：beads=[{"x":0,"y":0,"color":"F14"}]，每次1–5颗，x/y 为整数0..size-1。
+take_bead(board_id,x,y) 取豆；refill_beads(board_id,color) 用完后补80颗；get_bead_snapshot(board_id) 看 PNG。
+set_bead_work_plan/pin_bead_reference(board_id,beads,title?) 存1–512颗计划，title≤60字；continue_bead_work(board_id,handfuls?,interval_ms?) 执行1–8批，每批≤5颗，间隔250–1500毫秒。
+新版上游支持 upload_bead_reference(board_id,data_url)：真实 PNG/JPEG/WebP Base64 image data URL，≤1400000字符且原图≤1MB；只钉参考图，不推算坐标。Base64 耗 token，已有坐标用 pin_bead_reference。
+reveal_bead_gift(board_id) 揭晓；work_bead_finish(board_id,action)：params.action=cover→heat→start_iron→finish_iron→lift；等 heat_ready_at/cool_ready_at，熨烫2.8–6.2秒；uncover 在盖纸/预热时揭纸。
+
+list_gallery；save_gallery(kind,title?,source_id?,piece_columns?,piece_rows?)：kind=sketch/bead；sketch 需笔迹；bead 需网页保存装饰、source_id 豆板ID及正整数 piece_columns/piece_rows。
+share_work(item_id,note?)：note≤500字；AI 只能分享自己参与的作品。默认不分享，主动调用即分享，作者可看到图片及附言，不公开。

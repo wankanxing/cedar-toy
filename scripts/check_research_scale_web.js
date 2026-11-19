@@ -1,0 +1,1016 @@
+"use strict";
+// DOM + real in-process HTTP-handler smoke. No sockets or production databases.
+// This cannot replace browser rendering at mobile/desktop widths.
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
+const {spawn} = require('node:child_process');
+const readline = require('node:readline');
+const {JSDOM, VirtualConsole} = require('jsdom');
+const {checkHistoryTitles} = require('./history_title_cases');
+const root = path.resolve(__dirname, '..');
+const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'cedar-research-dom-'));
+const env = {...process.env, SESSIONS_DB:path.join(temp, 'sessions.db'), TURTLE_SOUP_DB:path.join(temp, 'accounts.db')};
+const bridge = `
+import io, json, sys
+from unittest.mock import Mock
+from tests_toy.tarot_server_test_bootstrap import install_missing_optional_game_stubs
+install_missing_optional_game_stubs()
+import server
+for config in server.HUMAN_TEST_GAMES.values():
+    config['handler'].DB_PATH = str(server.SESSIONS_DB_PATH)
+original_account=server._current_account
+for line in sys.stdin:
+    request=json.loads(line)
+    h=object.__new__(server.CedarToyHandler)
+    h.path=request['path']; h.client_address=('127.0.0.1',12345)
+    raw=json.dumps(request.get('body')).encode() if 'body' in request else b''
+    h.headers={'Content-Length':str(len(raw)), **request.get('headers',{})}
+    server._current_account=original_account
+    if h.headers.get('Authorization') == 'Bearer fixture-ai':
+        server._current_account=lambda token: {'id':99,'is_ai':True}
+    h.rfile=io.BytesIO(raw); h.wfile=io.BytesIO()
+    h.send_response=Mock(); h.send_header=Mock(); h.end_headers=Mock()
+    if 'body' in request: h.do_POST()
+    else: h.do_GET()
+    print(json.dumps({'status':h.send_response.call_args.args[0], 'body':h.wfile.getvalue().decode()}),flush=True)
+`;
+const child=spawn('python3',['-u','-c',bridge], {cwd:root,env,stdio:['pipe','pipe','inherit']});
+const queue=[];
+readline.createInterface({input:child.stdout}).on('line',line=>queue.shift().resolve(JSON.parse(line)));
+const exited=new Promise(resolve=>child.on('exit',code=>{
+  queue.splice(0).forEach(p=>p.reject(new Error('bridge exited '+code)));resolve();
+}));
+function request(url, body, headers={}) {
+  return new Promise((resolve,reject)=>{
+    queue.push({resolve,reject});
+    child.stdin.write(JSON.stringify({path:url,headers,...(body===undefined?{}:{body})})+'\n');
+  });
+}
+const tick = () => new Promise(resolve => setTimeout(resolve, 20));
+const requests=[];
+async function until(test,label){
+  for(let i=0;i<400;i++){if(test())return;await tick();}
+  throw new Error('timeout: '+label);
+}
+async function page(game, saved={}, options={}) {
+  const response=await request('/'+game);
+  assert.equal(response.status,200);
+  const dom=new JSDOM(response.body,{url:'https://fixture.invalid/'+game,runScripts:'dangerously',pretendToBeVisual:true,
+    beforeParse(window){
+      Object.defineProperty(window, 'innerWidth', {value:options.width || 1280});
+      window.HTMLElement.prototype.scrollIntoView=function(){};
+      // jsdom does not implement the native dialog top layer; browser test covers it.
+      window.HTMLDialogElement.prototype.showModal=function(){this.open=true;};
+      window.HTMLDialogElement.prototype.close=function(){this.open=false;};
+      window.confirm=()=>options.confirm ?? false;
+      if(options.timeoutAnswer) {
+        const setTimeout=window.setTimeout.bind(window);
+        window.setTimeout=(callback,ms,...args)=>setTimeout(callback,ms===15000?50:ms,...args);
+      }
+      for(const [key,value] of Object.entries(saved)) window.localStorage.setItem(key,value);
+      window.fetch=async (url,opts)=>{
+        const body=JSON.parse(opts.body);
+        requests.push({url,body});
+        if(url.endsWith('/save_answer') && options.waitAnswer) await options.waitAnswer;
+        if(url.endsWith('/save_answer') && options.failAnswer) {
+          options.failAnswer=false;
+          return {ok:false,status:503,json:async()=>({error:'保存失败'})};
+        }
+        const result=await request(url,body,opts.headers);
+        if(options.timeoutAnswer && url.endsWith('/save_answer')) {
+          options.timeoutAnswer=false;
+          await new Promise((resolve,reject)=>{
+            const abort=()=>reject(new window.DOMException('Timed out','AbortError'));
+            if(opts.signal.aborted) abort(); else opts.signal.addEventListener('abort',abort,{once:true});
+          });
+        }
+        if(options.loseAnswer && url.endsWith('/save_answer')) { options.loseAnswer=false; throw new Error('response lost'); }
+        return {ok:result.status===200,status:result.status,json:async()=>JSON.parse(result.body)};
+      };
+    }});
+  await until(()=>dom.window.eval('!busy') && dom.window.document.getElementById('statusText').textContent!=='SYSTEM / CONNECTING','initial state');
+  return dom;
+}
+function storage(dom){return {...dom.window.localStorage};}
+const $=(dom,id)=>dom.window.document.getElementById(id);
+async function choose(dom,option=0){
+  const slider=dom.window.document.querySelector('.research-slider');
+  if(slider) {
+    slider.value=option;
+    slider.dispatchEvent(new dom.window.Event('input'));
+    slider.dispatchEvent(new dom.window.Event('change'));
+  } else dom.window.document.querySelectorAll('#answers button')[option].click();
+  await until(()=>!dom.window.eval('busy'),'answer saved');
+}
+async function homeTitles(width, query="") {
+  const errors=[];
+  const virtualConsole=new VirtualConsole();
+  virtualConsole.on('jsdomError',error=>errors.push(error.message));
+  const dom=new JSDOM(fs.readFileSync(path.join(root,'index.html'),'utf8'),{
+    url:'https://fixture.invalid/'+query,runScripts:'dangerously',pretendToBeVisual:true,virtualConsole,
+    beforeParse(window) {
+      window.innerWidth=width;
+      window.matchMedia=query=>({matches:query.includes('max-width: 599px') && width<600});
+      window.fetch=async url=>({ok:true,status:200,json:async()=>String(url).includes('rooms')?[]:{}});
+    }
+  });
+  try {
+    await tick();
+    const d=dom.window.document;
+    const expected=query==='?tab=test'?'test':'mini';
+    assert.equal(dom.window.eval('filter'),expected);
+    assert.equal(d.querySelector('.tab-button.active').dataset.filter,expected);
+    assert.equal(dom.window.eval('games.filter(g=>g.testGroup==="deeptalk").length'),10);
+    d.querySelector('[data-filter="test"]').click();
+    const names=JSON.parse(dom.window.eval('JSON.stringify(Object.fromEntries(researchScales.map(([id,name])=>[id,name])))'));
+    assert.equal(Object.keys(names).length,18);
+    const examples={"aidep": "学习时，你有多依赖 AI？", "bsfl": "你害怕一个人吗？", "bsr": "什么话会让你觉得深刻？", "evs": "什么情况下你更容易受伤？", "ipip_adhd": "ADHD 相关特征", "ipip_empathy": "别人难过时，你会被触动吗？", "ipip_need_for_cognition": "你有多喜欢动脑？", "ipip_self_monitoring": "你会因场合调整自己的表现吗？", "ipip_sociability": "你有多喜欢社交？", "irrc": "亲密关系中的你：优势与难题", "jrrs": "恋爱中的你有多容易吃醋？", "mesx": "你的关怀圈有多大？", "ppts": "你的做事节奏：拖延与抢先完成", "rbi": "你怎样维系亲密关系？", "rnss": "你在人际关系中的需求被满足了吗？", "romlon": "你的浪漫孤独感有多强？", "ross": "难过时，你会怎么向伴侣求助？", "rss": "哪些习惯会让恋爱变难？"};
+    for(const [game,name] of Object.entries(names)) {
+      if(examples[game]) assert.equal(name,examples[game]);
+      assert.doesNotMatch(name,/描述版|娱乐改编版/);
+      assert.equal(d.querySelector(`[data-game="${game}"] .game-title`).textContent,name);
+      assert.equal(dom.window.eval(`games.find(g=>g.id===${JSON.stringify(game)}).url`),'/'+game);
+    }
+    for(const status of ['empty','insufficient','ready']) {
+      const distributions=Object.fromEntries(Object.keys(names).map(game=>[game,{
+        status,sample_size:20,dimensions:status==='ready'?[{label:'维度',buckets:[{result:'1–2',count:20}]}]:[]
+      }]));
+      dom.window.eval(`platformStatsState={data:{research_score_distributions:${JSON.stringify(distributions)}},loading:false,error:''};renderPlatformStats();`);
+      for(const [game,name] of Object.entries(names)) {
+        assert.equal(d.querySelector(`.platform-dist-${game} summary`).textContent,`${name} · 分数分布${status==='ready'?' · 20份':''}`);
+      }
+    }
+    if (query === "?tab=test") await dom.window.eval(`(${checkHistoryTitles.toString()})()`);
+    assert.deepEqual(errors,[]);
+    return names;
+  } finally { dom.window.close(); }
+}
+function expectedNotice(game) {
+  if (['rbi','irrc','jrrs','ross','rss','ppts','bsfl'].includes(game)) return '非官方评分，仅供娱乐参考。';
+  if (game==='bsr') return '题目经改编，仅供娱乐参考。';
+  if (game==='aidep') return '仅供人类，按原量表计分，仅供娱乐参考。';
+  return '按原量表计分，仅供娱乐参考。';
+}
+function assertResearchResult(dom, spec) {
+  const data=JSON.parse(dom.window.eval('JSON.stringify(activeState.result_data)'));
+  assert.equal($(dom,'resultText').hidden,true);
+  assert.equal($(dom,'resultStructured').hidden,false);
+  assert.deepEqual([...dom.window.document.querySelectorAll('.research-score dd .research-score-value')].map(n=>n.textContent),Object.values(data.scores).map(n=>n.toFixed(2)));
+  for (const [key, bounds] of Object.entries(data.score_ranges)) {
+    const order = Object.keys(data.scores).indexOf(key);
+    const shown = dom.window.document.querySelectorAll('.research-score dd')[order].textContent;
+    assert.ok(shown.includes(bounds.kind==='difference' ? `范围 ${bounds.min}～${bounds.max}` : ` / ${bounds.max}`), `${spec.game}/${key} range`);
+  }
+  assert.equal(dom.window.document.querySelectorAll('.research-report-footnote').length,0,'no dense report disclaimer');
+  assert.equal($(dom,'pageDisclaimer').textContent,expectedNotice(spec.game));
+  assert.equal(dom.window.document.querySelectorAll('.research-result .research-notice').length,0);
+  assert.equal(dom.window.document.querySelector('.research-result a').href,spec.source);
+  const hasReport=Boolean(data.interpretation);
+  assert.equal(dom.window.document.querySelectorAll('.research-interpretation').length,hasReport?1:0);
+  assert.equal(dom.window.document.querySelectorAll('.rbi-interpretation').length,spec.game==='rbi'&&!hasReport?1:0);
+  assert.doesNotMatch($(dom,'resultStructured').textContent,/存档身份|小机作答|原研究对象/);
+  assert.ok(dom.window.eval('activeState.result').startsWith(`【${dom.window.eval('displayTitle')}】`),'readable result uses player display title');
+  assert.equal(dom.window.eval('CONFIG.title'),spec.title,'formal source title retained');
+  assert.ok(dom.window.eval('activeState.notice').includes(spec.notice),'backend notice retained in metadata');
+  if(spec.scoring_note) assert.equal(data.scoring_note,spec.scoring_note);
+}
+async function checkRbiInterpretation(){
+  const dom=await page('rbi');
+  try {
+    // Actual engine result for 20/7, 25/7, 18/4, using the existing temporary DB bridge.
+    await dom.window.eval(`(async()=>{
+      renderState(await api('start',{mode:'full_fast',restart:true,confirm:true,session_id:activeState.session_id}));
+      renderState(await api('answer_batch',{answers:[3,3,3,3,3,3,2,4,4,4,4,3,3,3,4,4,5,5]}));
+    })()`);
+    const d=dom.window.document;
+    assert.deepEqual([...d.querySelectorAll('.research-score dd')].map(n=>n.textContent),['2.86 / 5','3.57 / 5','4.50 / 5']);
+    const serverReport=JSON.parse(dom.window.eval('JSON.stringify(activeState.result_data.interpretation)'));
+    if (serverReport) {
+      assert.equal(d.querySelector('.research-interpretation .research-summary').textContent,serverReport.summary);
+      assert.equal(d.querySelectorAll('.research-dimension').length,3);
+      assert.equal(d.querySelectorAll('.research-actions li').length,serverReport.recommendations.length);
+      assert.match(serverReport.summary,/谈感受|聊计划|开放表达|陪伴|需求|沟通|关心|回应/);
+      assert.equal(serverReport.recommendations.length,2,'two distinct practical actions');
+      assert.doesNotMatch(serverReport.summary,/\d+(?:\.\d+)?\s*\/\s*\d+/,'summary does not repeat numeric score');
+    }
+    // Keep the independent RBI client fallback tested for older API responses.
+    dom.window.eval(`renderResult({...activeState.result_data,interpretation:null},'')`);
+    const paragraphs=[...d.querySelectorAll('.rbi-interpretation p:not(.research-help)')].map(n=>n.textContent);
+    assert.equal(paragraphs.length,4);
+    assert.match(paragraphs[0],/中间选项.*双方都舒服/);
+    assert.match(paragraphs[1],/共同期待.*分工.*“做到了”/);
+    assert.match(paragraphs[2],/非常符合.*可行回应/);
+    assert.match(paragraphs[3],/4.50.*2.86.*1.64.*需求.*关心/);
+    assert.equal(d.querySelectorAll('.research-result .research-notice').length,0);
+    assert.match(d.querySelector('.rbi-interpretation .research-help').textContent,/平台反思建议，并非作者个人评分报告/);
+    const describe=scores=>JSON.parse(dom.window.eval(`JSON.stringify(describeRbiScores(${JSON.stringify(scores)}))`));
+    const score=(sai,fod,openness)=>({sai,fod,openness});
+    const equal=[1,3,5].map(n=>describe(score(n,n,n)));
+    assert.ok(equal.every(r=>r.observation.includes('不必分出主次')));
+    assert.equal(new Set(equal.map(r=>r.observation)).size,3);
+    for(let i=0;i<3;i++) assert.equal(new Set(equal.map(r=>r.dimensions[i].text)).size,3);
+    const permutations=[[1,3,5],[1,5,3],[3,1,5],[3,5,1],[5,1,3],[5,3,1]];
+    const directions=permutations.map(v=>describe(score(...v)).observation);
+    assert.equal(new Set(directions.map(t=>t.split('；')[1])).size,6,'six meaningful comparison directions');
+    for (const values of [[5,5,1],[5,1,5],[1,5,5],[5,1,1],[1,5,1],[1,1,5]]) {
+      assert.match(describe(score(...values)).observation,/并列/);
+    }
+    for (const values of [[3,3.1,3.2],[4.8,5,4.9],[1,1.1,1.2]]) {
+      assert.match(describe(score(...values)).observation,/不必分出主次/);
+      assert.doesNotMatch(describe(score(...values)).observation,/更突出|相对少/);
+    }
+    assert.match(describe(score(3,3.3,3.6)).observation,/相邻分数仍较接近/);
+    assert.match(describe(score(1,4.8,5)).observation,/较接近/);
+    assert.match(describe(score(1,1.2,5)).observation,/较接近/);
+    // Every anchor combination, immutability, finite output, no invented grading/diagnosis.
+    dom.window.eval(`for(let sai=1;sai<=5;sai++) for(let fod=1;fod<=5;fod++) for(let openness=1;openness<=5;openness++) {
+      const scores=Object.freeze({sai,fod,openness});
+      const result=describeRbiScores(scores);
+      if(result.dimensions.length!==3 || /undefined|NaN|高分|低分|诊断|关系质量差|伴侣不满意/.test(JSON.stringify(result))) throw Error('invalid RBI copy');
+    }`);
+    for(const expression of ['null','{}','{sai:3,fod:3}','{sai:null,fod:3,openness:3}',
+      '{sai:"3",fod:3,openness:3}','{sai:NaN,fod:3,openness:3}','{sai:Infinity,fod:3,openness:3}',
+      '{sai:0,fod:3,openness:3}','{sai:3,fod:6,openness:3}']) {
+      assert.equal(dom.window.eval(`describeRbiScores(${expression})`),null);
+    }
+    dom.window.eval(`renderResult({...activeState.result_data,interpretation:null,scores:{sai:3,fod:3}},'')`);
+    assert.equal(d.querySelector('.rbi-interpretation'),null,'partial dimensions keep scores without inventing interpretation');
+    assert.equal(d.querySelectorAll('.research-score').length,2);
+    dom.window.eval(`renderResult({...activeState.result_data,interpretation:null,scores:{sai:0,fod:3,openness:3}},'')`);
+    assert.equal(d.querySelector('.rbi-interpretation'),null);
+    assert.equal(d.querySelectorAll('.research-score').length,3);
+    dom.window.eval(`renderResult({...activeState.result_data,kind:'other'},'')`);
+    assert.equal(d.querySelector('.rbi-interpretation'),null);
+    console.log('PASS: RBI actual 2.86/3.57/4.50, six orders, ties, small gaps, 125 anchor combinations, invalid/missing scores and kind guard.');
+  } finally {dom.window.close();}
+}
+async function checkScaleControls() {
+  let dom=await page('ross'), d=dom.window.document;
+  const writes=()=>requests.filter(r=>r.url.endsWith('/save_answer'));
+  const input=()=>d.querySelector('.research-slider');
+  function pointer(type,value,id=1) {
+    const node=input();
+    node.getBoundingClientRect=()=>({left:0,width:224});
+    node.setPointerCapture=()=>{};node.releasePointerCapture=()=>{};
+    const event=new dom.window.Event(type,{cancelable:true});
+    Object.assign(event,{isPrimary:true,button:0,pointerId:id,clientX:12+value*20});
+    node.dispatchEvent(event);
+  }
+  assert.equal(d.querySelectorAll('#answers button').length,0);
+  assert.equal(d.querySelector('.research-scale-selection').textContent,'未选择');
+  assert.equal($(dom,'saveAnswerButton').disabled,true);
+  assert.equal(dom.window.eval('answers[0]'),null);
+  assert.equal(writes().length,0);
+  pointer('pointerdown',2);pointer('pointermove',7.3);
+  assert.equal(input().value,'7');
+  assert.equal(dom.window.eval('answers[0]'),null);
+  assert.equal(dom.window.eval('cursor'),0);
+  assert.equal(writes().length,0);
+  pointer('pointercancel',7);
+  assert.equal(input().hasAttribute('data-empty'),true);
+  pointer('pointerdown',5);pointer('pointerup',5);
+  await until(()=>!dom.window.eval('busy'),'midpoint selection');
+  assert.equal(writes().length,1);assert.equal(writes().at(-1).body.answer,5);
+  assert.equal(dom.window.eval('cursor'),1);
+  $(dom,'previousButton').click();
+  for(let value=0;value<=10;value++) {
+    const before=writes().length;
+    pointer('pointerdown',value);pointer('pointermove',value);
+    assert.equal(writes().length,before);
+    pointer('pointerup',value);
+    await until(()=>!dom.window.eval('busy'),'pointer commit');
+    assert.equal(writes().length,before+1);
+    assert.equal(writes().at(-1).body.answer,value);
+    assert.equal(dom.window.eval('cursor'),1);
+    $(dom,'previousButton').click();assert.equal(input().value,String(value));
+  }
+  let saved=storage(dom);dom.window.close();dom=await page('ross',saved);d=dom.window.document;
+  assert.equal(input().value,'10');
+  const before=writes().length;$(dom,'saveAnswerButton').click();
+  assert.equal(writes().length,before);assert.equal(dom.window.eval('cursor'),1);
+  input().dispatchEvent(new dom.window.KeyboardEvent('keydown',{key:'ArrowRight'}));
+  input().value='6';input().dispatchEvent(new dom.window.Event('input'));input().dispatchEvent(new dom.window.Event('change'));
+  assert.equal(writes().length,before,'keyboard change waits for release');
+  input().dispatchEvent(new dom.window.KeyboardEvent('keyup',{key:'ArrowRight'}));
+  await until(()=>!dom.window.eval('busy'),'keyboard release');
+  assert.equal(writes().length,before+1);
+  await choose(dom,4);
+  $(dom,'previousButton').click();$(dom,'previousButton').click();$(dom,'previousButton').click();
+  await choose(dom,0);$(dom,'saveAnswerButton').click();
+  assert.equal(input().value,'4');
+  saved=storage(dom);dom.window.close();dom=await page('ross',saved,{failAnswer:true});d=dom.window.document;
+  await choose(dom,9);
+  assert.equal(dom.window.eval('cursor'),2);assert.equal(input().value,'9');
+  assert.match($(dom,'error').textContent,/未确认保存/);
+  $(dom,'saveAnswerButton').click();await until(()=>!dom.window.eval('busy'),'retry');
+  assert.equal(dom.window.eval('cursor'),3);
+  saved=storage(dom);dom.window.close();dom=await page('ross',saved);d=dom.window.document;
+  assert.deepEqual(JSON.parse(dom.window.eval('JSON.stringify(activeState.saved_answers.slice(0,3))')),[0,6,9]);
+  while(dom.window.eval('cursor<activeState.total-1')) await choose(dom,5);
+  await choose(dom,5);
+  assert.equal(dom.window.eval('activeState.complete'),false);
+  assert.equal($(dom,'saveAnswerButton').textContent,'查看结果');
+  $(dom,'saveAnswerButton').click();await until(()=>!dom.window.eval('busy'),'finalize');
+  assert.equal($(dom,'resultPanel').hidden,false);dom.window.close();
+  const specs=fs.readdirSync(path.join(root,'research_scales/data')).filter(n=>n.endsWith('.json'))
+    .map(n=>JSON.parse(fs.readFileSync(path.join(root,'research_scales/data',n),'utf8'))).filter(s=>!s.blocked && s.game!=='ross');
+  for(const spec of specs) {
+    dom=await page(spec.game);d=dom.window.document;
+    assert.equal(d.querySelectorAll('#answers button').length,spec.options.length);
+    assert.equal(dom.window.getComputedStyle(d.querySelector('.research-scale-track')).gridTemplateColumns,`repeat(${spec.options.length}, minmax(0, 1fr))`);
+    if(spec.options.length===5) {
+      assert.equal(d.querySelector('.research-scale-middle'),null);assert.equal(d.querySelector('.research-scale-key'),null);
+      assert.equal(dom.window.eval('answers[0]'),null);
+      assert.equal($(dom,'saveAnswerButton').disabled,true);
+      for(const [index,option] of spec.options.entries()) {
+        const button=d.querySelectorAll('#answers button')[index];
+        assert.equal(button.textContent,String(option.value));
+        assert.equal(button.getAttribute('aria-label'),String(option.text).trim()===String(option.value) ? null : `${option.value}，${option.text}`);
+        const before=writes().length;
+        await choose(dom,index);
+        assert.equal(writes().length,before+1);assert.equal(writes().at(-1).body.answer,option.value);
+        assert.equal(dom.window.eval('cursor'),1);
+        $(dom,'previousButton').click();
+        assert.equal(d.querySelector('#answers button.selected').textContent,String(option.value));
+        assert.equal(d.querySelector('.research-scale-middle, .research-scale-key'),null);
+      }
+    } else if(spec.game==='mesx') assert.ok(d.querySelector('.research-scale-key'));
+    assert.deepEqual([...d.querySelectorAll('.research-scale-ends span')].map(n=>n.textContent),
+      spec.game==='mesx' ? ['0 · 圈外','3 · 内圈'] : [spec.options[0],spec.options.at(-1)].map(o=>`${o.value} · ${o.text}`));
+    await choose(dom,2);assert.equal(dom.window.eval('cursor'),1);
+    $(dom,'previousButton').click();assert.equal(d.querySelector('button.selected').textContent,String(spec.options[2].value));
+    saved=storage(dom);dom.window.close();dom=await page(spec.game,saved);d=dom.window.document;
+    assert.equal(d.querySelector('#answers button.selected').textContent,String(spec.options[2].value));
+    const count=writes().length;$(dom,'saveAnswerButton').click();assert.equal(writes().length,count);
+    dom.window.close();
+  }
+  for(const game of ['mbti','ecr','sins_virtues','enneagram']) {
+    dom=await page(game);d=dom.window.document;
+    if(d.querySelector('.mode-button')) {d.querySelector('.mode-button').click();await until(()=>!dom.window.eval('busy'),'legacy start');}
+    assert.equal(d.querySelector('.research-slider'),null);
+    assert.ok(d.querySelector('#answers button'));
+    await choose(dom);assert.equal(dom.window.eval('cursor'),1);dom.window.close();
+  }
+  console.log('PASS targeted DOM + real HTTP handlers (temporary DBs): slider click/drag/cancel/keyboard, integers 0–10, no default, save/retry/revisit/reload/finalize; all 17 other shared scale shapes; MBTI/ECR/sins/enneagram. No browser geometry claim.');
+}
+
+async function checkIntegratedResumeSafety() {
+  // Invalid data in the active key must survive the first subsequent write too.
+  for (const [n, raw] of ['{broken', '', JSON.stringify({session_id:'other-run',answers:[1]})].entries()) {
+    const player=`guest:webinvalidactive${n}`;
+    const state=JSON.parse((await request('/api/romlon/start',{player_id:player,mode:'full'})).body);
+    const key=`cedartoy_romlon_web_draft_${player}_session_${state.session_id}`;
+    const dom=await page('romlon',{cedartoy_guest_web_player_id:player,[key]:raw});
+    assert.equal($(dom,'resumeDialog').open,false);
+    await choose(dom);
+    assert.equal(dom.window.eval('activeState.saved_answers[0]'),1);
+    assert.ok(Object.entries(storage(dom)).some(([k,v])=>k.includes('_conflict_') && v===raw),'invalid active draft preserved before overwrite');
+    dom.window.close();
+  }
+  // Two intervening writes in one millisecond must retain both alternatives.
+  const dom=await page('romlon');
+  dom.window.eval('Date.now = () => 123456789');
+  const key=dom.window.eval('currentDraftKey()');
+  for(const raw of ['first external draft','second external draft']) {
+    dom.window.localStorage.setItem(key,raw);
+    dom.window.eval('saveDraft()');
+  }
+  const archives=Object.entries(storage(dom)).filter(([k])=>k.includes('_conflict_')).map(([,v])=>v);
+  assert.ok(archives.includes('first external draft'));
+  assert.ok(archives.includes('second external draft'));
+  // If preservation fails, never replace the original active-slot contents.
+  dom.window.localStorage.setItem(key,'must survive quota failure');
+  dom.window.eval(`{
+    const originalSet = Storage.prototype.setItem;
+    Storage.prototype.setItem = function(k,v) {
+      if(k.includes('_conflict_')) throw new DOMException('quota','QuotaExceededError');
+      return originalSet.call(this,k,v);
+    };
+  }`);
+  assert.throws(()=>dom.window.eval('saveDraft()'),/quota/);
+  assert.equal(dom.window.localStorage.getItem(key),'must survive quota failure');
+  dom.window.close();
+  console.log('PASS: invalid active drafts, same-millisecond archives, storage quota preservation.');
+}
+
+async function checkHumanUiFixes() {
+  const spec=JSON.parse(fs.readFileSync(path.join(root,'research_scales/data/mesx.json'),'utf8'));
+  const labels=['0 圈外','1 边缘','2 外圈','3 内圈'];
+  const meanings=['不纳入道德关怀范围','最低程度关怀，不认为有责任','会关心但责任较低','高度关怀，愿意承担责任'];
+  let dom=await page('mesx');
+  function checkMeanings() {
+    const d=dom.window.document;
+    const intro=$(dom,'questionIntro');
+    assert.deepEqual(intro.textContent.split('\n').slice(1,5),labels.map((label,i)=>`${label}：${meanings[i]}`));
+    assert.equal(dom.window.getComputedStyle(intro).whiteSpace,'pre-line');
+    assert.ok(intro.compareDocumentPosition($(dom,'answers')) & dom.window.Node.DOCUMENT_POSITION_FOLLOWING);
+    assert.equal(d.querySelector('.mesx-circle-key'),null);
+    assert.doesNotMatch(d.querySelector('style').textContent,/mesx-circle-key/,'obsolete styles removed');
+    meanings.forEach(meaning=>{
+      assert.equal(d.querySelector('main').textContent.split(meaning).length-1,1,'short meaning appears only in intro');
+      assert.ok(!$(dom,'answers').textContent.includes(meaning),'no short meanings beside options');
+    });
+    assert.equal(d.querySelector('.research-scale-key').open,false);
+    assert.equal(d.querySelectorAll('.research-scale-key p').length,4,'full definitions retained');
+    assert.deepEqual(JSON.parse(dom.window.eval('JSON.stringify(activeState.questions[0].options)')),spec.options);
+    [...d.querySelectorAll('#answers button')].forEach((b,i)=>{
+      assert.equal(b.getAttribute('aria-describedby'),null);
+      assert.equal(b.getAttribute('aria-label'),`${i}，${spec.options[i].text}`);
+      assert.equal(b.textContent,String(i));
+    });
+    assert.equal($(dom,'resumeProgressButton'),null);
+  }
+  checkMeanings();
+  assert.equal($(dom,'progressLabel').textContent,'1 / 10');
+  for(let value=0;value<4;value++) {
+    if(value) $(dom,'previousButton').click();
+    await choose(dom,value);
+    assert.equal(dom.window.eval('activeState.saved_answers[0]'),value,'original score saved');
+    assert.equal(dom.window.eval('cursor'),1);
+    assert.equal(dom.window.document.activeElement,$(dom,'questionText'),'reading focus retained');
+    assert.equal(dom.window.getComputedStyle($(dom,'questionText')).outline,'none');
+    checkMeanings();
+  }
+  assert.equal($(dom,'progressFill').style.width,'10%');
+  const saved=storage(dom);dom.window.close();dom=await page('mesx',saved);
+  assert.equal(dom.window.eval('cursor'),1);
+  assert.equal(dom.window.eval('activeState.saved_answers[0]'),3);
+  checkMeanings();dom.window.close();
+
+  // Every ordinary route using this shared template must boot without the deleted node.
+  const games=fs.readdirSync(path.join(root,'research_scales/data')).filter(n=>n.endsWith('.json'))
+    .map(n=>JSON.parse(fs.readFileSync(path.join(root,'research_scales/data',n),'utf8'))).filter(s=>!s.blocked).map(s=>s.game);
+  for(const game of [...games,'mbti','enneagram','dnd','love','ecr','humanity','sins_virtues']) {
+    dom=await page(game);
+    assert.equal($(dom,'resumeProgressButton'),null,game);
+    assert.equal($(dom,'error').hidden,true,game+' boots');
+    assert.ok($(dom,'progressLabel') && $(dom,'progressFill') && $(dom,'restartButton'));
+    dom.window.close();
+  }
+  // Selecting a legacy copy writes that signature into the active slot and ignored list.
+  // Reload must not filter out the active slot just because those signatures match.
+  const copyPlayer='guest:webuifixcopy';
+  const copyState=JSON.parse((await request('/api/romlon/start',{player_id:copyPlayer,mode:'full_fast'})).body);
+  const copyKey=`cedartoy_romlon_web_draft_${copyPlayer}`;
+  const copyCurrent=`${copyKey}_session_${copyState.session_id}`;
+  const oldCopy={game:'romlon',edition:'full_fast',session_id:copyState.session_id,total:4,answers:[1,2,null,null],cursor:2};
+  const selectedCopy={...oldCopy,answers:[4,4,4,null],cursor:3};
+  dom=await page('romlon',{cedartoy_guest_web_player_id:copyPlayer,[copyKey]:JSON.stringify(selectedCopy),[copyCurrent]:JSON.stringify(oldCopy)});
+  [...$(dom,'resumeChoices').children].find(b=>b.textContent.includes('已答 3/4')).click();
+  assert.equal(dom.window.document.activeElement,$(dom,'questionText'));
+  const copies=storage(dom);dom.window.close();dom=await page('romlon',copies);
+  assert.equal($(dom,'resumeDialog').open,false,'chosen copy does not prompt again');
+  assert.deepEqual(Array.from(dom.window.eval('answers')),[4,4,4,null],'current slot survives ignored legacy signature');
+  assert.equal(dom.window.eval('cursor'),3);
+  assert.ok(Object.values(storage(dom)).includes(JSON.stringify(oldCopy)),'old active draft preserved verbatim');
+  assert.equal(dom.window.localStorage.getItem(copyKey),JSON.stringify(selectedCopy),'legacy original preserved verbatim');
+  dom.window.close();
+  // Conflicting local progress still opens the real choice dialog automatically.
+  const player='guest:webuifixconflict';
+  const state=JSON.parse((await request('/api/romlon/start',{player_id:player,mode:'full_fast'})).body);
+  const key=`cedartoy_romlon_web_draft_${player}`;
+  const current=`${key}_session_${state.session_id}`;
+  const legacy={game:'romlon',edition:'full_fast',total:4,answers:[1,2,null,null],cursor:2};
+  const branch={...legacy,session_id:state.session_id,answers:[4,4,4,null],cursor:3};
+  dom=await page('romlon',{cedartoy_guest_web_player_id:player,[key]:JSON.stringify(legacy),[current]:JSON.stringify(branch)});
+  assert.equal($(dom,'resumeDialog').open,true);
+  [...$(dom,'resumeChoices').children].find(b=>b.textContent.includes('已答 3/4')).click();
+  assert.equal(dom.window.eval('cursor'),3);
+  assert.ok(Object.values(storage(dom)).includes(JSON.stringify(legacy)),'other progress preserved');
+  dom.window.localStorage.setItem(key,JSON.stringify({...legacy,answers:[2,2,null,null]}));
+  const conflictStorage=storage(dom);dom.window.close();dom=await page('romlon',conflictStorage);
+  assert.equal($(dom,'resumeDialog').open,true,'new conflict remains discoverable');
+  $(dom,'resumeChoices').lastElementChild.click();
+  assert.equal($(dom,'resumeTitle').textContent,'重新开始？');
+  $(dom,'resumeDialog').dispatchEvent(new dom.window.Event('cancel',{cancelable:true}));
+  assert.equal(dom.window.eval('activeState.session_id'),state.session_id,'Escape never restarts');
+  assert.equal($(dom,'resumeDialog').open,true,'unresolved conflict remains available');
+  $(dom,'resumeChoices').lastElementChild.click();
+  $(dom,'resumeChoices').lastElementChild.click();
+  await until(()=>!dom.window.eval('busy'),'conflict restart');
+  assert.notEqual(dom.window.eval('activeState.session_id'),state.session_id);
+  dom.window.close();
+  // The result-page retest still requires confirmation; cancel keeps the completed run.
+  dom=await page('romlon');
+  for(let i=0;i<4;i++) await choose(dom);
+  $(dom,'saveAnswerButton').click();await until(()=>!dom.window.eval('busy'),'result');
+  assert.equal($(dom,'resultPanel').hidden,false);
+  const session=dom.window.eval('activeState.session_id');
+  $(dom,'restartButton').click();
+  assert.equal($(dom,'resumeDialog').open,true);
+  $(dom,'resumeChoices').firstElementChild.click();
+  assert.equal(dom.window.eval('activeState.session_id'),session);
+  $(dom,'restartButton').click();$(dom,'resumeChoices').lastElementChild.click();
+  await until(()=>!dom.window.eval('busy'),'confirmed retest');
+  assert.notEqual(dom.window.eval('activeState.session_id'),session);
+  assert.equal($(dom,'progressLabel').textContent,'1 / 4');
+  dom.window.close();
+  console.log('PASS: MESx intro-only short meanings / no duplicate option help / original values / save / reading focus / reload; 25 shared routes without duplicate progress button; automatic conflict choice / preserved alternative / restart confirmation; result retest cancel and confirm.');
+}
+
+async function main(){
+  if(process.env.HUMAN_UI_FIXES_ONLY==='1') return checkHumanUiFixes();
+  if(process.env.RESUME_SAFETY_ONLY==='1') return checkIntegratedResumeSafety();
+  if(process.env.SCALE_UI_ONLY==='1') return checkScaleControls();
+  await checkIntegratedResumeSafety();
+  await checkRbiInterpretation();
+  const games=fs.readdirSync(path.join(root,'research_scales/data')).filter(n=>n.endsWith('.json'))
+    .map(n=>JSON.parse(fs.readFileSync(path.join(root,'research_scales/data',n),'utf8'))).filter(s=>!s.blocked);
+  assert.equal(games.length,18);
+  assert.equal(games.filter(s=>s.options.length===5).length,13,'all thirteen compact five-step scales');
+  let names;
+  for(const width of [360,430,1280]) {
+    for(const query of ["", "?tab=test", "?tab=mini", "?tab=invalid"]) names=await homeTitles(width,query);
+  }
+  for(const spec of games){
+    let dom=await page(spec.game), d=dom.window.document;
+    assert.equal($(dom,'title').textContent,names[spec.game]);
+    assert.equal(d.title,`${names[spec.game]} · CEDAR TOY`);
+    assert.ok([...d.querySelectorAll('.brand, .back-link, #resultPanel .actions a')].every(a=>a.getAttribute('href')==='/?tab=test'));
+    assert.doesNotMatch($(dom,'questionIntro').textContent,/自动保存|不可修改|续答旧版/);
+    assert.equal(dom.window.eval('CONFIG.title'),spec.title,'formal title stays intact');
+    assert.equal(d.querySelectorAll('.mode-button').length,0,spec.game);
+    assert.equal($(dom,'modePanel').hidden,true);
+    assert.equal($(dom,'questionPanel').hidden,false);
+    assert.equal($(dom,'pageDisclaimer').textContent,expectedNotice(spec.game));
+    assert.equal($(dom,'researchDetails').open,false);
+    assert.doesNotMatch($(dom,'researchDetails').textContent,/小机作答|4399|不作诊断|原研究对象|常模|效度/);
+    assert.equal($(dom,'researchDetails').querySelector('summary').textContent,'来源与许可');
+    assert.ok($(dom,'researchDetails').contains($(dom,'source')));
+    const rows=[...$(dom,'source').querySelectorAll('dd')];
+    assert.equal(rows.length,4);
+    assert.equal(rows[0].textContent,spec.author,'full author credit retained');
+    assert.equal(rows[1].textContent,spec.source);
+    assert.equal(rows[2].textContent,spec.license.replace(/\s*(?:—\s*)?https?:\/\/[^\s；]+/g,''),'license name/restrictions retained');
+    const licenseURL=spec.license.match(/https?:\/\/[^\s；]+/);
+    if(licenseURL) assert.equal(rows[2].querySelector('a').href,licenseURL[0]);
+    assert.ok(rows[2].querySelector('a'),'clickable license');
+    if(spec.license_source) assert.equal(rows[2].querySelector('a').href,spec.license_source);
+    assert.ok(rows[3].textContent.length<40,'one short translation/adaptation line');
+    assert.ok([...$(dom,'source').querySelectorAll('a')].some(a=>a.href===spec.source));
+    for(const a of $(dom,'source').querySelectorAll('a')) {
+      assert.match(a.href,/^https?:\/\//);
+      assert.equal(a.rel,'noopener noreferrer');
+    }
+    assert.equal($(dom,'researchSaveHint'),null);
+    assert.equal($(dom,'saveAnswerButton').textContent,'下一题');
+    assert.equal($(dom,'saveAnswerButton').disabled,true);
+    const buttons=[...d.querySelectorAll('#answers button')];
+    const slider=d.querySelector('.research-slider');
+    const compactFive=spec.options.length===5;
+    assert.equal(buttons.length,slider?0:spec.options.length);
+    // Computed CSS catches cascade regressions; jsdom cannot measure geometry.
+    const css=node=>dom.window.getComputedStyle(node);
+    assert.equal(css($(dom,'pageDisclaimer')).fontSize,'12px');
+    assert.equal(css($(dom,'questionIntro')).fontSize,'13px');
+    assert.equal(css($(dom,'saveAnswerButton')).minHeight,'44px');
+    const track=d.querySelector('.research-scale-track');
+    assert.ok(track || slider,spec.game+' consecutive numeric scale uses a track, including fully worded options');
+    assert.equal(css(d.querySelector('.research-scale-ends')).fontSize,'12px');
+    if(!slider) assert.equal(css(track).gridTemplateColumns,spec.options.length<=7
+      ? `repeat(${spec.options.length}, minmax(0, 1fr))` : 'repeat(auto-fit, minmax(44px, 1fr))');
+    if(!slider) assert.equal(css(buttons[0]).minHeight,'48px');
+    if(!slider) assert.equal(css(buttons[0]).fontSize,'13px');
+    if(!slider) spec.options.forEach((option,i)=>{
+      assert.equal(buttons[i].textContent,String(option.value));
+      if(String(option.value)===String(option.text)) {
+        assert.equal(buttons[i].getAttribute('aria-label'),null,'no invented middle labels');
+      } else {
+        assert.ok(buttons[i].textContent.includes(option.text) || buttons[i].getAttribute('aria-label').includes(option.text));
+      }
+    });
+    const selectedLabel=option=>slider ? `${option.value} 分` : labelFor(option);
+    const labelFor=option=>String(option.value)===String(option.text).trim() ? String(option.value) : `${option.value} · ${option.text}`;
+    assert.deepEqual([...d.querySelectorAll('.research-scale-ends span')].map(n=>n.textContent),
+      spec.game==='mesx' ? ['0 · 圈外','3 · 内圈'] : [labelFor(spec.options[0]),labelFor(spec.options.at(-1))]);
+    const middle=spec.options.length%2 ? spec.options[Math.floor(spec.options.length/2)] : null;
+    assert.equal(d.querySelector('.research-scale-middle')?.textContent ?? null,
+      !compactFive && middle && String(middle.text)!==String(middle.value) ? labelFor(middle) : null,'only supplied middle meaning');
+    assert.equal(d.querySelector('.research-scale-selection').textContent,slider?'未选择':'','no selection claimed initially');
+    const meaningsFor = spec.game==='mesx'
+      ? spec.options.map(o=>`${o.value} · ${spec.instruction.match(new RegExp(o.text.split('：')[0]+'：[^；。]+'))[0]}。`)
+      : spec.options.map(labelFor);
+    if(spec.game==='bsr') {
+      assert.equal($(dom,'questionIntro').textContent,'请阅读下面的句子，判断你觉得它们有多深刻。\n这里的「深刻」指含义深远、具有广泛意义。\n按直觉选择 1～5 分，没有标准答案。');
+      assert.equal(css($(dom,'questionIntro')).whiteSpace,'pre-line');
+      assert.equal(dom.window.eval('activeState.instructions'),spec.instruction);
+    }
+    if(spec.game==='mesx') {
+      assert.equal($(dom,'questionText').textContent,'家庭成员');
+      assert.equal($(dom,'questionIntro').textContent,'请根据你对以下对象的关怀程度选择圈层，没有标准答案。\n0 圈外：不纳入道德关怀范围\n1 边缘：最低程度关怀，不认为有责任\n2 外圈：会关心但责任较低\n3 内圈：高度关怀，愿意承担责任\n关怀包括在意对方的处境，以及愿意为对方承担责任或付出代价。');
+      assert.equal(css($(dom,'questionIntro')).whiteSpace,'pre-line','newline must render visibly');
+      assert.equal(dom.window.eval('activeState.instructions'),spec.instruction,'shared instructions unchanged');
+    }
+    const key=d.querySelector('.research-scale-key');
+    if(!compactFive && spec.options.slice(1,-1).some(o=>String(o.value)!==String(o.text))) {
+      assert.equal(key.open,false);
+      assert.deepEqual([...key.querySelectorAll('p')].map(n=>n.textContent),meaningsFor);
+      key.open=true;
+    } else assert.equal(key,null);
+    for(const [i,option] of spec.options.entries()) {
+      const meanings=d.querySelector('.research-scale-key');
+      if(meanings) meanings.open=true;
+      const before=requests.length;
+      if(slider) {
+        const input=d.querySelector('.research-slider'); input.value=option.value;
+        input.dispatchEvent(new dom.window.Event('input')); input.dispatchEvent(new dom.window.Event('change'));
+      } else d.querySelectorAll('#answers button')[i].click();
+      assert.equal(dom.window.eval('cursor'),0,'wait for the server before advancing');
+      assert.equal(dom.window.eval('answers[0]'),option.value,spec.game+' exact selected value');
+      assert.equal(d.querySelector('.research-scale-selection').textContent,`已选：${selectedLabel(option)}`);
+      if(!slider) assert.equal(d.querySelectorAll('#answers [aria-pressed="true"]').length,1);
+      if(meanings) assert.equal(d.querySelector('.research-scale-key').open,true);
+      await until(()=>!dom.window.eval('busy'),'option saved before advancing');
+      assert.equal(dom.window.eval('cursor'),1);
+      assert.equal(requests.length,before+1,'one click, one save');
+      assert.equal(requests.at(-1).body.finish,false);
+      assert.equal(dom.window.eval('activeState.saved_answers[0]'),option.value);
+      assert.equal(d.activeElement,$(dom,'questionText'));
+      $(dom,'previousButton').click();
+      assert.equal(slider ? d.querySelector('.research-slider').value : d.querySelector('#answers button.selected').textContent,String(option.value));
+      assert.equal(d.querySelector('.research-scale-selection').textContent,`已选：${selectedLabel(option)}`);
+    }
+    // All 18 real pages: one click saves and advances, reload retains the receipt,
+    // unchanged Next is read-only, editing an earlier answer preserves later ones.
+    await choose(dom);
+    let receipt=JSON.parse(dom.window.eval('JSON.stringify([activeState.saved_answers,activeState.answer_revision])'));
+    let saved=storage(dom);dom.window.close();dom=await page(spec.game,saved);d=dom.window.document;
+    assert.equal(dom.window.eval('cursor'),1);
+    assert.deepEqual(JSON.parse(dom.window.eval('JSON.stringify([activeState.saved_answers,activeState.answer_revision])')),receipt);
+    $(dom,'previousButton').click();
+    assert.equal(d.querySelector('.research-scale-selection').textContent,`已选：${selectedLabel(spec.options[0])}`);
+    const beforeNext=requests.length;
+    $(dom,'saveAnswerButton').click();
+    assert.equal(dom.window.eval('cursor'),1);
+    assert.equal(requests.length,beforeNext,'unchanged Next does not write');
+    assert.equal(dom.window.eval('activeState.answer_revision'),receipt[1]);
+    assert.equal($(dom,'saveAnswerButton').hidden,false);
+    assert.equal($(dom,'saveAnswerButton').disabled,true,'unanswered Next stays disabled');
+    await choose(dom,1);
+    await choose(dom,2);
+    assert.equal(dom.window.eval('cursor'),3);
+    $(dom,'previousButton').click();$(dom,'previousButton').click();$(dom,'previousButton').click();
+    await choose(dom,1);
+    assert.equal(dom.window.eval('cursor'),1,'changed first answer saves before advancing one question');
+    const afterEdit=requests.length;
+    $(dom,'saveAnswerButton').click();
+    assert.equal(requests.length,afterEdit,'saved second answer only navigates');
+    assert.equal(dom.window.eval('cursor'),2);
+    assert.equal(dom.window.eval('answers[2]'),spec.options[2].value,'third selection survives first edit');
+    receipt=JSON.parse(dom.window.eval('JSON.stringify([activeState.saved_answers,activeState.answer_revision])'));
+    saved=storage(dom);dom.window.close();dom=await page(spec.game,saved);d=dom.window.document;
+    assert.equal(dom.window.eval('cursor'),2);
+    assert.deepEqual(JSON.parse(dom.window.eval('JSON.stringify([activeState.saved_answers,activeState.answer_revision])')),receipt);
+    assert.deepEqual(JSON.parse(dom.window.eval('JSON.stringify(answers.slice(0,3))')),[spec.options[1].value,spec.options[1].value,spec.options[2].value]);
+    if(!slider) assert.equal(d.querySelector('#answers button.selected').getAttribute('aria-pressed'),'true');
+    const questionTexts=JSON.parse(dom.window.eval('JSON.stringify(activeState.questions.map(q=>q.text))'));
+    assert.equal(new Set(questionTexts).size,spec.items.length,'question text identifies the same item across randomized sessions');
+    const submittedByText=Object.fromEntries(questionTexts.map((text,i)=>[text,spec.options[i<2?1:0].value]));
+    for(let i=2;i<spec.items.length;i++) {
+      assert.equal($(dom,'saveAnswerButton').textContent,i===spec.items.length-1?'查看结果':'下一题');
+      await choose(dom);
+    }
+    assert.equal(dom.window.eval('cursor'),spec.items.length-1);
+    assert.equal(dom.window.eval('activeState.progress'),spec.items.length);
+    assert.equal(dom.window.eval('activeState.complete'),false,'last selection saves without finalizing');
+    assert.equal(requests.at(-1).body.finish,false);
+    const lastRevision=dom.window.eval('activeState.answer_revision');
+    const beforeLastReview=requests.length;
+    $(dom,'previousButton').click();
+    assert.equal(dom.window.eval('cursor'),spec.items.length-2);
+    $(dom,'saveAnswerButton').click();
+    assert.equal(dom.window.eval('cursor'),spec.items.length-1);
+    assert.equal(requests.length,beforeLastReview,'reviewing the saved last pair never writes');
+    saved=storage(dom);dom.window.close();dom=await page(spec.game,saved);d=dom.window.document;
+    assert.equal(dom.window.eval('activeState.answer_revision'),lastRevision);
+    assert.equal($(dom,'resultPanel').hidden,true);
+    assert.equal($(dom,'saveAnswerButton').textContent,'查看结果');
+    $(dom,'saveAnswerButton').click();await until(()=>!dom.window.eval('busy'),'explicit finalization');
+    assert.equal(requests.at(-1).body.finish,true);
+    assert.equal($(dom,'resultPanel').hidden,false);
+    assertResearchResult(dom,spec);
+    // Compare UI-submitted values with the unchanged batch scoring path.
+    const baselinePlayer='guest:webratingbaseline'+spec.game.replaceAll('_','');
+    const baselineResponse=await request('/api/'+spec.game+'/start',{player_id:baselinePlayer,mode:'full_fast'});
+    assert.equal(baselineResponse.status,200,baselineResponse.body);
+    const baseline=JSON.parse(baselineResponse.body);
+    const baselineResult=JSON.parse((await request('/api/'+spec.game+'/answer_batch',{
+      player_id:baselinePlayer,session_id:baseline.session_id,
+      answers:baseline.questions.map(q=>submittedByText[q.text])
+    })).body);
+    assert.deepEqual(JSON.parse(dom.window.eval('JSON.stringify(activeState.result_data.scores)')),baselineResult.result_data.scores,spec.game+' score unchanged');
+    const result=$(dom,'resultStructured').textContent;
+    assert.equal($(dom,'compareBox').hidden,true);
+    saved=storage(dom);dom.window.close();dom=await page(spec.game,saved);
+    assertResearchResult(dom,spec);
+    assert.equal($(dom,'resultStructured').textContent,result);
+    const before=requests.length;
+    $(dom,'restartButton').click();
+    assert.equal($(dom,'resumeDialog').open,true);
+    $(dom,'resumeChoices').firstElementChild.click();
+    assert.equal(requests.length,before,'cancel retest is read-only');
+    $(dom,'restartButton').click();
+    $(dom,'resumeChoices').lastElementChild.click();await until(()=>!dom.window.eval('busy'),'retest');
+    assert.equal($(dom,'questionPanel').hidden,false);
+    assert.equal(requests.at(-1).body.confirm,true);
+    assert.equal(requests.at(-1).body.restart,true);
+    assert.equal(requests.at(-1).body.mode,'full');
+    assert.equal(dom.window.document.querySelector('.research-scale-selection').textContent,slider?'未选择':'');
+    assert.equal(dom.window.document.querySelector('#answers button.selected'),null);
+    dom.window.close();
+  }
+  // Pre-session-ID website drafts remain usable only with the live batch run.
+  for (const numericId of [false, true]) {
+    const player = `guest:weboldformat${numericId}`;
+    const state = JSON.parse((await request('/api/romlon/start', {player_id:player, mode:'full_fast'})).body);
+    const key = `cedartoy_romlon_web_draft_${player}`;
+    const old = {game:'romlon',edition:'full_fast',total:4,answers:[1,2,null,null],cursor:2};
+    if (numericId) old.session_id = Number(state.session_id);
+    const raw = JSON.stringify(old);
+    const empty = JSON.stringify({...old, session_id:state.session_id, answers:[null,null,null,null],cursor:0});
+    const d = await page('romlon', {cedartoy_guest_web_player_id:player,[key]:raw,[`${key}_session_${state.session_id}`]:empty});
+    assert.equal(d.window.eval('cursor'),2,'empty newer slot must not hide valid legacy progress');
+    assert.deepEqual(Array.from(d.window.eval('answers')),[1,2,null,null]);
+    assert.equal($(d,'progressFill').style.width,'50%');
+    assert.equal($(d,'resumeDialog').open,false,'unique valid progress resumes directly');
+    assert.equal(d.window.localStorage.getItem(key),raw);
+    // A different run cannot inherit these answers (including no-ID old drafts).
+    d.window.eval('requestRestart()');
+    $(d,'resumeChoices').lastElementChild.click(); await until(()=>!d.window.eval('busy'),'restart legacy');
+    assert.equal(d.window.eval('cursor'),0);
+    assert.ok(Array.from(d.window.eval('answers')).every(v=>v===null));
+    assert.equal(d.window.localStorage.getItem(key),raw);
+    d.window.close();
+  }
+  // A sole valid preserved copy must not be hidden behind an empty active slot.
+  {
+    const player='guest:webarchiveonly';
+    const state=JSON.parse((await request('/api/romlon/start',{player_id:player,mode:'full_fast'})).body);
+    const key=`cedartoy_romlon_web_draft_${player}_session_${state.session_id}`;
+    const copy={game:'romlon',edition:'full_fast',session_id:state.session_id,total:4,answers:[1,2,null,null],cursor:2};
+    const raw=JSON.stringify(copy);
+    const d=await page('romlon',{cedartoy_guest_web_player_id:player,[key]:JSON.stringify({...copy,answers:[null,null,null,null],cursor:0}),[key+'_conflict_123']:raw});
+    assert.equal(d.window.eval('cursor'),2);
+    assert.equal($(d,'resumeDialog').open,false);
+    assert.equal(d.window.localStorage.getItem(key+'_conflict_123'),raw);
+    d.window.close();
+  }
+  // Two differing local batch progresses require an explicit, recoverable choice.
+  {
+    const player='guest:webbatchconflict';
+    const state=JSON.parse((await request('/api/romlon/start',{player_id:player,mode:'full_fast'})).body);
+    const base=`cedartoy_romlon_web_draft_${player}`;
+    const key=`${base}_session_${state.session_id}`;
+    const original=JSON.stringify({game:'romlon',edition:'full_fast',session_id:state.session_id,total:4,answers:[1,2,null,null],cursor:2});
+    const changed=JSON.stringify({...JSON.parse(original),answers:[3,2,1,null],cursor:3});
+    let d=await page('romlon',{cedartoy_guest_web_player_id:player,[base]:original,[key]:changed});
+    assert.equal($(d,'resumeDialog').open,true);
+    assert.match($(d,'resumeChoices').textContent,/已答 2\/4.*第 1 题：1/);
+    assert.match($(d,'resumeChoices').textContent,/已答 3\/4.*第 1 题：3/);
+    [...$(d,'resumeChoices').children].find(b=>b.textContent.includes('已答 3/4')).click();
+    assert.equal(d.window.eval('cursor'),3);
+    assert.equal(d.window.eval('answers[0]'),3);
+    const kept=storage(d);d.window.close();d=await page('romlon',kept);
+    assert.equal($(d,'resumeDialog').open,false,'resolved conflict does not recur');
+    assert.equal(d.window.eval('answers[0]'),3);
+    assert.ok(Object.values(storage(d)).includes(original));
+    assert.equal($(d,'resumeProgressButton'),null,'no manual progress menu');
+    d.window.close();
+  }
+  // Another device has no local cursor: resume at the server's next question.
+  {
+    let d=await page('romlon'); await choose(d); await choose(d,1);
+    const player=d.window.eval('activeState.player_id');
+    const staleKey=d.window.eval('currentDraftKey()');
+    const stale=JSON.stringify({...d.window.eval('draftSnapshot()'),base_answers:[],answers:[null,null,null,null],cursor:0});
+    d.window.close();
+    d=await page('romlon',{cedartoy_guest_web_player_id:player,[staleKey]:stale});
+    assert.equal(d.window.eval('cursor'),2,'server advancement supersedes an old local cursor at question one');
+    d.window.close();
+    d=await page('romlon',{cedartoy_guest_web_player_id:player});
+    assert.equal(d.window.eval('cursor'),2);
+    assert.deepEqual(Array.from(d.window.eval('answers')),[1,2,null,null]);
+    // Preserve a concurrent localStorage write before saving our own cursor.
+    const key=d.window.eval('currentDraftKey()');
+    const concurrent=JSON.stringify({...d.window.eval('draftSnapshot()'),answers:[4,2,null,null]});
+    d.window.localStorage.setItem(key,concurrent);
+    $(d,'previousButton').click();
+    assert.ok(Object.entries(storage(d)).some(([k,v])=>k.includes('_conflict_') && v===concurrent));
+    d.window.close();
+  }
+  // Legacy full_fast record and original-format draft: no reset or conversion.
+  const player='guest:weblegacy';
+  const state=JSON.parse((await request('/api/romlon/start',{player_id:player,mode:'full_fast'})).body);
+  const key='cedartoy_romlon_web_draft_'+player;
+  const raw=JSON.stringify({game:'romlon',edition:'full_fast',session_id:state.session_id,total:4,answers:[1,2,null,null],cursor:2});
+  let dom=await page('romlon',{cedartoy_guest_web_player_id:player,[key]:raw});
+  assert.doesNotMatch($(dom,'questionIntro').textContent,/旧版|只存本机|自动保存|不可修改/);
+  assert.match($(dom,'progressLabel').textContent,/3 \/ 4/);
+  $(dom,'previousButton').click();await choose(dom,2);
+  let saved=storage(dom);dom.window.close();dom=await page('romlon',saved);
+  assert.equal(dom.window.eval('answers[1]'),3);
+  assert.equal(dom.window.localStorage.getItem(key),raw,'legacy original kept verbatim');
+  await choose(dom);await choose(dom);
+  assert.equal($(dom,'reviewPanel').hidden,false);
+  $(dom,'modifyButton').click();$(dom,'previousButton').click();await choose(dom,1);
+  $(dom,'submitButton').click();await until(()=>!dom.window.eval('busy'),'legacy submit');
+  assert.equal($(dom,'resultPanel').hidden,false);
+  assert.equal(requests.at(-1).body.session_id,state.session_id);
+  assert.deepEqual(requests.at(-1).body.answers,[1,3,2,1]);
+  dom.window.close();
+  // Mismatched and malformed drafts never silently replaced or deleted.
+  for(const raw of ['{broken',JSON.stringify({game:'romlon',edition:'full_fast',session_id:'old',total:4,answers:[1,2,null,null]})]){
+    dom=await page('romlon',{[key]:raw,cedartoy_guest_web_player_id:player});
+    assert.equal(dom.window.localStorage.getItem(key),raw);
+    assert.equal($(dom,'resumeDialog').open,false);
+    assert.doesNotMatch(dom.window.document.body.textContent,/旧草稿|下载核对/);
+    dom.window.close();
+  }
+  // A lost answer response can be retried without double advancing.
+  dom=await page('romlon',{}, {loseAnswer:true});await choose(dom);
+  assert.match($(dom,'error').textContent,/未确认保存/);
+  assert.equal(dom.window.eval('cursor'),0);
+  assert.equal(dom.window.eval('activeState.progress'),0);
+  assert.ok(dom.window.document.querySelector('#answers button.selected'));
+  $(dom,'saveAnswerButton').click();await until(()=>!dom.window.eval('busy'),'idempotent retry');
+  assert.equal(dom.window.eval('activeState.progress'),1);
+  dom.window.close();
+  // The server may commit before the response times out. Retry is still idempotent.
+  dom=await page('ipip_empathy',{}, {timeoutAnswer:true});
+  await choose(dom,2);
+  assert.match($(dom,'error').textContent,/保存请求超时.*未确认保存/);
+  assert.equal(dom.window.eval('cursor'),0);
+  assert.equal(dom.window.eval('activeState.progress'),0);
+  assert.equal(dom.window.document.querySelector('.research-scale-key'),null);
+  assert.equal(dom.window.document.querySelector('.research-scale-selection').textContent,'已选：3 · 介于符合与不符合之间');
+  const timeoutSaved=storage(dom);
+  const timeoutObserver=await page('ipip_empathy',timeoutSaved);
+  const timeoutRevision=timeoutObserver.window.eval('activeState.answer_revision');
+  assert.equal(timeoutObserver.window.eval('activeState.saved_answers[0]'),3);
+  timeoutObserver.window.close();
+  $(dom,'saveAnswerButton').click();await until(()=>!dom.window.eval('busy'),'timeout retry');
+  assert.equal(dom.window.eval('cursor'),1);
+  assert.equal(dom.window.eval('activeState.progress'),1);
+  assert.equal(dom.window.eval('activeState.answer_revision'),timeoutRevision,'idempotent retry leaves the committed revision unchanged');
+  dom.window.close();
+  // Finalization failure retains the saved last answer and its explicit retry button.
+  const finalOptions={};
+  dom=await page('romlon',{},finalOptions);
+  for(let i=0;i<4;i++) await choose(dom);
+  assert.equal(dom.window.eval('activeState.complete'),false);
+  finalOptions.failAnswer=true;
+  $(dom,'saveAnswerButton').click();await until(()=>!dom.window.eval('busy'),'failed finalization');
+  assert.equal(dom.window.eval('cursor'),3);
+  assert.equal(dom.window.eval('activeState.complete'),false);
+  assert.equal($(dom,'saveAnswerButton').textContent,'查看结果');
+  assert.equal($(dom,'saveAnswerButton').disabled,false);
+  $(dom,'previousButton').click();await choose(dom,1);
+  assert.equal(dom.window.eval('cursor'),3);
+  assert.equal(dom.window.eval('activeState.saved_answers[2]'),2);
+  finalOptions.loseAnswer=true;
+  $(dom,'saveAnswerButton').click();await until(()=>!dom.window.eval('busy'),'lost final result response');
+  assert.equal(dom.window.eval('activeState.complete'),false);
+  assert.equal(dom.window.eval('cursor'),3);
+  const finalRequest=requests.at(-1).body;
+  $(dom,'saveAnswerButton').click();await until(()=>!dom.window.eval('busy'),'retry finalization');
+  assert.deepEqual(requests.at(-1).body,finalRequest,'final retry repeats the exact receipt');
+  assert.equal(dom.window.eval('activeState.complete'),true);
+  dom.window.close();
+  // Real server writes are gated behind success, at mobile and desktop DOM sizes.
+  for(const width of [360,430,1280]) {
+    let release;
+    const opts={width,failAnswer:true,waitAnswer:new Promise(resolve=>{release=resolve;})};
+    dom=await page('romlon',{},opts);
+    const before=requests.filter(r=>r.url.endsWith('/save_answer')).length;
+    dom.window.document.querySelector('#answers button').click();
+    dom.window.document.querySelectorAll('#answers button')[1].click();
+    $(dom,'saveAnswerButton').click();$(dom,'saveAnswerButton').click();
+    assert.equal(dom.window.eval('busy'),true);
+    assert.equal(dom.window.eval('cursor'),0,'no optimistic navigation');
+    assert.ok([...dom.window.document.querySelectorAll('#questionPanel button')].every(b=>b.disabled));
+    assert.equal(requests.filter(r=>r.url.endsWith('/save_answer')).length,before+1,'double click sends once');
+    release();await until(()=>!dom.window.eval('busy'),'failed save');
+    assert.equal(dom.window.eval('cursor'),0);
+    assert.equal($(dom,'saveAnswerButton').disabled,false);
+    assert.match($(dom,'error').textContent,/保存失败/);
+    saved=storage(dom);dom.window.close();dom=await page('romlon',saved,{width});
+    assert.equal(dom.window.eval('activeState.progress'),0);
+    assert.equal(dom.window.document.querySelector('#answers button.selected').textContent,'1');
+    $(dom,'saveAnswerButton').click();await until(()=>!dom.window.eval('busy'),'retry succeeds');
+    assert.equal(dom.window.eval('activeState.progress'),1);
+    assert.equal(dom.window.eval('cursor'),1);
+    assert.equal(dom.window.document.activeElement,$(dom,'questionText'));
+    dom.window.close();
+  }
+  // A local choice conflicting with another tab's saved answer stays downloadable.
+  const conflictPlayer='guest:webconflict';
+  const conflictState=JSON.parse((await request('/api/romlon/start',{player_id:conflictPlayer,mode:'full'})).body);
+  await request('/api/romlon/answer',{player_id:conflictPlayer,session_id:conflictState.session_id,expected_index:0,answer:1});
+  const conflictKey=`cedartoy_romlon_web_draft_${conflictPlayer}_session_${conflictState.session_id}`;
+  const conflictRaw=JSON.stringify({game:'romlon',edition:'full',session_id:conflictState.session_id,total:4,answers:[2,null,null,null],cursor:0});
+  dom=await page('romlon',{cedartoy_guest_web_player_id:conflictPlayer,[conflictKey]:conflictRaw});
+  assert.equal(dom.window.eval('answers[0]'),1,'server receipt wins for display');
+  assert.equal($(dom,'resumeDialog').open,true);
+  $(dom,'resumeChoices').firstElementChild.click();
+  await choose(dom);
+  const archived=Object.entries(storage(dom)).find(([key])=>key.startsWith(conflictKey+'_conflict_'));
+  assert.equal(archived[1],conflictRaw,'conflicting selection preserved before next write');
+  dom.window.close();
+  // Two live tabs: a stale first-answer edit cannot overwrite the latest value.
+  dom=await page('rbi');await choose(dom);
+  const shared=storage(dom);
+  const other=await page('rbi',shared);
+  $(dom,'previousButton').click();$(other,'previousButton').click();
+  await choose(dom,1);
+  await choose(other,2);
+  assert.match($(other,'error').textContent,/其他页面更新/);
+  assert.equal(other.window.eval('cursor'),0);
+  assert.equal(other.window.eval('answers[0]'),3,'failed edit stays selected for review');
+  const fresh=await page('rbi',storage(dom));
+  assert.equal(fresh.window.eval('answers[0]'),2,'latest server answer remains intact');
+  const conflictStorage=storage(other);other.window.close();
+  const recovered=await page('rbi',conflictStorage);
+  assert.equal(recovered.window.eval('answers[0]'),2);
+  assert.equal($(recovered,'resumeDialog').open,true,'conflicting local edit can be chosen');
+  [...$(recovered,'resumeChoices').children].find(b=>b.textContent.includes('这台设备')).click();
+  assert.equal(recovered.window.eval('answers[0]'),3,'explicit choice restores the previously unsaved edit');
+  $(recovered,'saveAnswerButton').click();await until(()=>!recovered.window.eval('busy'),'save chosen branch');
+  assert.equal(recovered.window.eval('activeState.saved_answers[0]'),3);
+  assert.equal($(recovered,'resumeDialog').open,false);
+  recovered.window.close();fresh.window.close();dom.window.close();
+  // No authenticated-to-guest replay on an expired login.
+  const before=requests.length;
+  dom=await page('romlon',{cedartoy_token:'expired'});
+  assert.match($(dom,'error').textContent,/登录已失效/);
+  assert.equal(requests.length,before+1);
+  assert.equal(dom.window.localStorage.getItem('cedartoy_token'),'expired');dom.window.close();
+  dom=await page('aidep',{cedartoy_token:'fixture-ai'});
+  assert.match($(dom,'error').textContent,/人类/);
+  assert.equal($(dom,'questionPanel').hidden,true);dom.window.close();
+  // All seven original tests sharing this template still auto-advance locally,
+  // allow edits, then batch-submit. The eighth has its own untouched page.
+  for(const game of ['mbti','enneagram','dnd','love','ecr','humanity','sins_virtues']){
+    dom=await page(game);
+    assert.equal($(dom,'title').textContent,dom.window.eval('CONFIG.title'));
+    assert.ok([...dom.window.document.querySelectorAll('.brand, .back-link, #resultPanel .actions a')].every(a=>a.getAttribute('href')==='/?tab=test'));
+    assert.equal(dom.window.document.title,dom.window.eval('CONFIG.title')+' · CEDAR TOY');
+    assert.equal($(dom,'error').hidden,true,'legacy test database is isolated and readable');
+    if(['mbti','enneagram'].includes(game)) {
+      assert.equal($(dom,'modePanel').hidden,false);
+      assert.equal(dom.window.document.querySelectorAll('.mode-button').length,2);
+      dom.window.document.querySelector('.mode-button').click();
+      await until(()=>!dom.window.eval('busy'),'old mode start');
+    }
+    assert.equal($(dom,'researchDetails').hidden,true);
+    assert.equal($(dom,'saveAnswerButton').hidden,true);
+    const before=requests.length;
+    const total=dom.window.eval('activeState.total');
+    dom.window.document.querySelector('#answers button').click();
+    assert.equal(dom.window.eval('cursor'),1,'old selection auto-advances');
+    $(dom,'previousButton').click();
+    assert.equal(dom.window.document.querySelector('#answers button.selected').disabled,false);
+    dom.window.document.querySelectorAll('#answers button')[1].click();
+    const changed=dom.window.eval('answers[0]');
+    saved=storage(dom);dom.window.close();dom=await page(game,saved);
+    assert.equal(dom.window.eval('answers[0]'),changed);
+    for(let i=1;i<total;i++) dom.window.document.querySelector('#answers button').click();
+    assert.equal($(dom,'reviewPanel').hidden,false);
+    assert.equal(requests.length,before+1,'only the reload reads from backend');
+    $(dom,'submitButton').click();await until(()=>!dom.window.eval('busy'),'old batch result');
+    assert.equal($(dom,'resultPanel').hidden,false,game);
+    assert.equal($(dom,'resultStructured').hidden,false,game+' original structured result');
+    assert.equal(dom.window.document.querySelector('.research-result'),null);
+    assert.ok(requests.at(-1).url.endsWith('/answer_batch'));
+    dom.window.close();
+  }
+  // Untrusted question/source/notice remain plain text, never HTML.
+  dom=await page('romlon');
+  // Six and ten steps are not in today's specs; retain the same layout contract.
+  for(const count of [4,5,6,7,10]) {
+    const options=Array.from({length:count},(_,i)=>({value:i,text:'原档位 '+i}));
+    dom.window.eval(`$('answers').innerHTML='';renderResearchOptions({options:${JSON.stringify(options)}});`);
+    assert.equal(dom.window.getComputedStyle(dom.window.document.querySelector('.research-scale-track')).gridTemplateColumns,
+      count<=7 ? `repeat(${count}, minmax(0, 1fr))` : 'repeat(auto-fit, minmax(44px, 1fr))');
+  }
+  dom.window.eval(`$('answers').innerHTML='';renderResearchOptions({options:[{value:1,text:'甲'},{value:3,text:'乙'},{value:4,text:'丙'},{value:5,text:'丁'}]});`);
+  assert.equal(dom.window.document.querySelector('.research-scale-track'),null,'nonconsecutive categories retain their answer list');
+  dom.window.eval(`$('answers').innerHTML='';renderResearchOptions({options:[1,2,3,4,5].map(value=>({value,text:'<img src=x onerror="window.xss=1">'}))});`);
+  assert.equal($(dom,'answers').querySelector('img'),null,'option anchors and key are plain text');
+  dom.window.eval(`activeState.questions[0].text='<img src=x onerror="window.xss=1">'; renderQuestion();`);
+  assert.equal($(dom,'questionText').querySelector('img'),null);
+  dom.window.eval(`setResearchLinkedText($('source'), '<img src=x onerror="window.xss=1"> https://example.org/paper?a=1&b=2；许可');`);
+  assert.equal($(dom,'source').querySelector('img'),null);
+  assert.equal($(dom,'source').querySelector('a').href,'https://example.org/paper?a=1&b=2');
+  dom.window.eval(`renderResult({kind:'research_scale',scores:{zero:0,negative:-2.5},dimensions:{zero:'零值',negative:'<img src=x onerror="window.xss=1">'}}, '原始冗余说明');`);
+  assert.deepEqual([...dom.window.document.querySelectorAll('.research-score dd')].map(n=>n.textContent),['0.00','-2.50']);
+  assert.equal($(dom,'resultStructured').querySelector('img'),null);
+  dom.window.eval(`renderResult({kind:'research_scale',scores:{bad:null},dimensions:{bad:'缺失分数'}}, '原始冗余说明');`);
+  assert.equal($(dom,'resultText').textContent,'暂时无法展示分数，请刷新重试。');
+  assert.equal(dom.window.xss,undefined);dom.window.close();
+  console.log('PASS: all 18 real specs: click saves before advancing, unchanged Next makes no write/revision change, edits preserve later answers, reload keeps receipts, last selection saves without finalizing and explicit result remains retryable; 4–7 horizontal steps/10 wrapping CSS/0–10 slider, compact five-step controls (0–4 and 1–5) and accessible option meanings, score parity, source/notice unchanged; delayed/failed/timed-out/lost writes, double-click/concurrent tabs, legacy answer card and seven original template flows. DOM only, no rendered geometry.');
+}
+main().catch(e=>{console.error(e);process.exitCode=1;}).finally(async()=>{
+  child.stdin.end();await exited;fs.rmSync(temp,{recursive:true,force:true});
+});

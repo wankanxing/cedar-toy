@@ -1,0 +1,78 @@
+# cedartoy 备份体系
+
+> 2026-07-17 升级：sqlite 一致性快照 + 每周恢复演练 + R2 异地推送。
+
+## 方案总览
+
+| 组件 | 位置 | 触发 |
+|---|---|---|
+| 每日备份脚本 | `scripts/backup_cedartoy.sh` | `/etc/cron.d/cedartoy-backup`，每日 3:50（赶在 4:00 guest 清理前） |
+| 恢复演练脚本 | `scripts/backup_restore_check.py` | `/etc/cron.d/cedartoy-backup-check`，每周一 4:30 |
+| 本地归档 | `/home/backups/cedartoy/data_YYYYMMDD.tar.gz` | 按日期保留最近 3 份 R2 已验证的成功归档 |
+| 异地归档 | R2 `cedarclio-backup` 桶下 `cedartoy-backups/` 前缀 | 每日备份后 rclone 推送 |
+| 日志 | `/var/log/cedartoy-backup.log`、`/var/log/cedartoy-backup-check.log` | cron 追加 |
+
+## 每日备份（backup_cedartoy.sh）
+
+现行入口是 `/etc/cron.d/cedartoy-backup` 调用 `scripts/backup_cedartoy.sh`。仓库 `deploy/cron.d/cedartoy-backup` 仍是旧的直接 tar 模板，缺少 SQLite 一致性快照、data 外数据库与 R2 推送，不要覆盖到生产配置。恢复时先核对覆盖发生在所选日期 03:50 备份之前还是之后。
+
+旧方案直接 `tar` 打包 `/opt/cedartoy/data`，对启用 WAL 的 sqlite 库（sessions.db）有拿到不一致快照的风险，且遗漏了 data 之外的两个生产库。新流程（生产数据全程只读）：
+
+1. 把 `data/` 复制到临时 staging 目录，排除 `*.db` / `*.db-wal` / `*.db-shm`（历史 `*.db.bak-*` 文件原样保留）；
+2. 对 `data/` 下递归找到的全部 `*.db`（含 sessions、花园便签、塔罗等）及脚本 `EXTRA_DBS` 中的 `turtle-soup/backend/turtle_soup.db`、`toy-platform/toy_accounts.db`、`vendor/duel/data/duel.db` 用 `sqlite3 .backup` 导出一致性快照到 staging 对应路径，并逐个跑 `PRAGMA quick_check`。空占位库也在扫描范围；不要因此把它们当业务主库。`vendor/` 下除上述双弈库外的数据库不在该脚本扫描范围，服务自定义数据库路径也不会由环境变量自动加入；新增/迁移存储时必须核对覆盖范围。
+3. 打包为 `data_YYYYMMDD.tar.gz`（先写 `.tmp` 再原子改名）。归档内路径相对 `/opt/cedartoy`：`data/...`、`turtle-soup/backend/turtle_soup.db`、`toy-platform/toy_accounts.db`、`vendor/duel/data/duel.db`；
+4. `rclone copy` 推送 R2；上传失败保留新生成的归档及全部旧本地包，跳过清理并以退出码 2 上报；
+5. 上传成功后只读列出 R2 对象，核对本地每日包的同名及大小。只处理严格命名为 `data_YYYYMMDD.tar.gz`、日期有效的普通文件，按文件名日期倒序保留最近 3 份已核对的成功归档（不同日期，不按 mtime 或距今小时数）。远端缺失或大小不符的本地包额外保留，不占这 3 份名额；当前包验证失败或 R2 列举失败时不删除。手工快照、符号链接、`.tmp` 和非标准名称不参与清理；R2 历史对象不删除。
+
+环境变量可覆盖（自测用）：`BACKUP_APP_ROOT`（默认 `/opt/cedartoy`，隔离测试根目录）、`BACKUP_ROOT`、`R2_REMOTE`（置空跳过推送及本地清理）、`RETENTION_COUNT`（正整数，默认 3，替代旧 `RETENTION_DAYS`）。
+
+任一步失败最多执行 3 次尝试，间隔由 `RETRY_DELAY_SECONDS` 控制（默认 300 秒）；全败以非零状态退出并打印 `BACKUP FAILED AFTER 3 ATTEMPTS`。R2 失败保留已生成的本地归档，仍参与重试。
+
+## 每周恢复演练（backup_restore_check.py）
+
+每周一 4:30 自动执行，也可手动 `python3 scripts/backup_restore_check.py [--archive 路径]`：
+
+1. 取 `/home/backups/cedartoy` 下最新 `data_*.tar.gz`，解包到临时目录（拒绝越界成员）；
+2. 包内所有 `.db` 跑 `PRAGMA integrity_check`；
+3. 关键路径抽查：sessions.db 的 `eco_sessions`（eco 存档）非空；`data/vendor_saves` 游戏子目录与线上对照无缺失；抽样 20 个 `progress.json` / `save.json` 可解析；
+4. 新布局附加库（turtle-soup / toy-platform 快照）缺失记 WARN（2026-07-17 之前的旧格式归档属正常）。
+
+结果 `PASS` / `PASS_WITH_WARNINGS`（退出码 0）或 `FAIL`（退出码 1）。
+
+## 2026-07-17 演练结果
+
+**对今日凌晨真实备份 `data_20260717.tar.gz`（旧格式，3.7 MB）：`PASS_WITH_WARNINGS`，退出码 0。**
+- 3 个 .db integrity_check 全部 ok；eco_sessions 338 行；vendor_saves 8 个游戏目录齐全（arcade/burger/fishing/imitator_td/leek/market/memoria/workkk）；抽样 20 个 progress/save JSON 解析 0 失败。
+- 2 项 WARN：旧格式归档缺 turtle_soup.db / toy_accounts.db 快照（预期，明日起新格式包含）。
+
+**对新脚本自测产物（新格式，6.2 MB）：`PASS`，无警告** —— 5 个 .db（含 turtle_soup.db、toy_accounts.db）integrity_check 全部 ok，其余检查同上。自测归档与 R2 selftest 前缀已清理。
+
+## R2 排查结论（2026-07-17）
+
+- 本机 cedarclio 的异地备份机制：root crontab 每日 21:30 运行 `/opt/cedarclio/backup.sh`（pg_dump + chroma 打包），用 **snap 版 rclone**（`/snap/bin/rclone`，配置在 `/root/snap/rclone/599/.config/rclone/rclone.conf`）推送到 `cloudflare_r2_clio:cedarclio-backup`（alias → `cloudflare_r2:cedarclio-backup`，Cloudflare R2 S3 端点）。日志确认每日推送成功。
+- **凭证可复用但为桶级 token**：无 ListBuckets 权限，且对其它桶（试探 `cedartoy-backups`）AccessDenied，无法新建独立桶。因此 cedartoy 备份推送到同一桶下的独立前缀 **`cloudflare_r2:cedarclio-backup/cedartoy-backups/`**，与 cedarclio 的归档（位于 `cedarclio-backup/cedarclio-backup/` 前缀）互不干扰；cedarclio 现有备份逻辑未做任何改动。
+- 已把今日 `data_20260717.tar.gz` 手动推送到该前缀作为种子；此后由每日备份自动推送。
+- 注意事项：snap 版 rclone 受沙箱限制**读不到 `/tmp`**，推送源文件须放在 `/home` 等常规路径（本方案归档在 `/home/backups/cedartoy`，不受影响）；R2 历史对象继续保留，本地留存规则不适用于远端，不执行远端删除。
+- 未创建任何新凭证、未安装新工具。
+
+## 恢复步骤（手册）
+
+```bash
+tar -xzf /home/backups/cedartoy/data_YYYYMMDD.tar.gz -C /tmp/restore
+# 核对后按需拷回：
+#   /tmp/restore/data/...                            → /opt/cedartoy/data/
+#   /tmp/restore/turtle-soup/backend/turtle_soup.db  → /opt/cedartoy/turtle-soup/backend/
+#   /tmp/restore/toy-platform/toy_accounts.db        → /opt/cedartoy/toy-platform/
+# 拷回前停服务：supervisorctl -c /etc/supervisor/supervisord.conf stop cedartoy
+# 远端取档：rclone copy cloudflare_r2:cedarclio-backup/cedartoy-backups/data_YYYYMMDD.tar.gz /tmp/
+```
+
+## 弈间局外钱包（工作树实现，2026-10-27）
+
+默认目录 `data/autochess_rooms/` 的房间 JSON，以及新 `economy/accounts.db` 中的钱包、装扮、赠礼/领取、转盘、结算和重试凭据，纳入同一每日归档；沿用该归档的既有 R2 推送与保留流程，不另建远端桶或凭据。`.pending` 与进程锁文件不备份。SQLite 的 WAL/SHM 不直接复制，以 `.backup` 的一致性快照为准。
+
+复制顺序必须保持「房间 JSON → SQLite 钱包快照」。运行时先提交钱包结算，再持久化房间 paid 标记，因此此顺序避免已备份的 paid 房间领先于钱包凭据；钱包领先的未付款房间重载时由原作结算账本去重。打包前检查房间版本和钱包 state/receipts；无效快照失败，不覆盖源档。跨游戏并不承诺同一时点的全站事务。若 `CHESS_ROOM_DATA` 改到该目录以外，必须另外明确加入归档与校验，不能因本段而认为自定义路径自动受覆盖。
+
+恢复应在获准停写后，从同一归档恢复整套《弈间》房间和钱包；先在副本核验 `integrity_check`、金额/拥有物/赠礼、重复结算不再发币，再替换。保留旧数据和失败快照；不要把独立房间回档与较旧的钱包拼接，更不能新建空钱包代替已有账本。旧 slim 数据没有钱包时按首次访问创建本游戏零余额，已结束且标为 guest 的旧局不追补发币。
+
+本轮用临时账户/房间/钱包跑实际 `backup_cedartoy.sh` 并解包校验通过，`BACKUP_APP_ROOT` 指向临时目录、`R2_REMOTE` 置空；没有运行生产备份、上传、删除或恢复 R2。每周恢复检查已有递归 SQLite 完整性检查，正式发布后仍需确认首份新钱包每日归档与远端对象并在副本演练恢复。

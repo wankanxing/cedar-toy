@@ -1,0 +1,597 @@
+import asyncio
+import json
+import logging
+
+from fastapi import APIRouter, Body, Depends, HTTPException
+
+import judge
+from auth_utils import authenticated_player, current_player
+from room_access import require_room_access
+from database import execute, fetch_all, fetch_one, get_db, get_setting
+from ask_quota import get_ask_quota, reserve_daily_ask
+from models import ContentBody, GuessBody, HintRequestBody, HintResponseBody, RevealAnswerBody
+from presence import touch_room
+from sse import broadcast
+from utils import ROOM_FINISHED_STATUS_HINT, SQL_NOW, clean_content
+
+router = APIRouter(prefix="/game", tags=["game"])
+logger = logging.getLogger(__name__)
+_hint_locks: dict[str, asyncio.Lock] = {}
+_ask_locks: dict[str, asyncio.Lock] = {}
+ANSWER_REVEALED_STATUS_HINT = "你已经公布并查看过本局汤底，不能继续提问、猜测或请求提示。"
+
+
+def _hint_lock(room_id: str) -> asyncio.Lock:
+    lock = _hint_locks.get(room_id)
+    if lock is None:
+        lock = asyncio.Lock()
+        _hint_locks[room_id] = lock
+    return lock
+
+
+def _ask_lock(room_id: str) -> asyncio.Lock:
+    lock = _ask_locks.get(room_id)
+    if lock is None:
+        lock = asyncio.Lock()
+        _ask_locks[room_id] = lock
+    return lock
+
+
+async def _room(room_id: str) -> dict:
+    room = await fetch_one(
+        """
+        SELECT r.*,
+               COALESCE(pz.surface, r.surface) AS surface,
+               COALESCE(pz.answer, r.answer)   AS answer
+        FROM rooms r
+        LEFT JOIN puzzles pz ON pz.id = r.puzzle_id
+        WHERE r.id = ?
+        """,
+        (room_id,),
+    )
+    if not room:
+        raise HTTPException(status_code=404, detail="房间不存在")
+    return room
+
+
+async def _write_judge_audit(
+    *,
+    room_id: str,
+    player_id: int | None,
+    game_log_id: int | None,
+    action: str,
+    result: dict,
+    db=None,
+) -> None:
+    request_messages = result.get("request_messages")
+    request_json = None
+    if request_messages is not None:
+        request_json = json.dumps(request_messages, ensure_ascii=False)
+    parsed = result.get("raw_json")
+    parsed_json = json.dumps(parsed, ensure_ascii=False) if parsed is not None else None
+    await (db.execute if db is not None else execute)(
+        """
+        INSERT INTO judge_audit_logs (
+            room_id, player_id, game_log_id, action, success, score,
+            missing_core_count, request_json, raw_response, parsed_json, error
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            room_id,
+            player_id,
+            game_log_id,
+            action,
+            1 if result.get("success") else 0,
+            result.get("score"),
+            result.get("missing_core_count"),
+            request_json,
+            result.get("raw_response"),
+            parsed_json,
+            result.get("error"),
+        ),
+    )
+
+
+def _ensure_active(room: dict) -> None:
+    if room["status"] == "finished":
+        raise HTTPException(status_code=400, detail=ROOM_FINISHED_STATUS_HINT)
+
+
+async def _player_revealed_answer(room_id: str, player_id: int) -> bool:
+    row = await fetch_one(
+        "SELECT 1 FROM room_answer_reveals WHERE room_id = ? AND player_id = ?",
+        (room_id, player_id),
+    )
+    return row is not None
+
+
+async def _ensure_player_can_play(room_id: str, player: dict) -> None:
+    if await _player_revealed_answer(room_id, int(player["id"])):
+        raise HTTPException(status_code=400, detail=ANSWER_REVEALED_STATUS_HINT)
+
+
+async def _ensure_can_play_in_transaction(db, room_id: str, player_id: int | None = None) -> dict:
+    rows = await db.execute_fetchall("SELECT * FROM rooms WHERE id=?", (room_id,))
+    if not rows:
+        raise HTTPException(status_code=404, detail="房间不存在")
+    room = dict(rows[0])
+    _ensure_active(room)
+    if player_id is not None:
+        revealed = await db.execute_fetchall(
+            "SELECT 1 FROM room_answer_reveals WHERE room_id=? AND player_id=?",
+            (room_id, player_id),
+        )
+        if revealed:
+            raise HTTPException(status_code=400, detail=ANSWER_REVEALED_STATUS_HINT)
+    return room
+
+
+async def _log_payload(log_id: int) -> dict:
+    return await fetch_one(
+        """
+        SELECT gl.id, gl.room_id, gl.player_id, gl.type, gl.content, gl.judgment,
+               gl.hint_text, gl.resolved, gl.created_at,
+               p.username, p.is_guest, p.is_ai
+        FROM game_logs gl
+        LEFT JOIN players p ON p.id = gl.player_id
+        WHERE gl.id = ?
+        """,
+        (log_id,),
+    )
+
+
+async def _ask_count(room_id: str) -> int:
+    row = await fetch_one("SELECT COUNT(*) AS c FROM game_logs WHERE room_id = ? AND type = 'ask'", (room_id,))
+    return int(row["c"])
+
+
+async def _pending_hint(room_id: str, player_id: int | None = None) -> dict | None:
+    if player_id is not None:
+        return await fetch_one(
+            "SELECT id FROM game_logs WHERE room_id = ? AND player_id = ? AND type = 'hint_offer' AND resolved = 0",
+            (room_id, player_id),
+        )
+    return await fetch_one(
+        "SELECT id FROM game_logs WHERE room_id = ? AND type = 'hint_offer' AND resolved = 0",
+        (room_id,),
+    )
+
+
+async def _manual_hint_count(room_id: str, player_id: int) -> int:
+    row = await fetch_one(
+        "SELECT COUNT(*) AS c FROM game_logs WHERE room_id = ? AND player_id = ? AND type = 'hint_offer'",
+        (room_id, player_id),
+    )
+    return int(row["c"] if row else 0)
+
+
+async def _system_notice(room_id: str, player_id: int | None = None) -> dict:
+    log_id = await execute(
+        "INSERT INTO game_logs (room_id, type, content) VALUES (?, 'system', ?)",
+        (room_id, judge.SYSTEM_BUSY_NOTICE),
+    )
+    if player_id is not None:
+        await touch_room(room_id, player_id)
+    payload = await _log_payload(log_id)
+    await broadcast(room_id, "new_log", payload)
+    return payload | {"system_error": True}
+
+
+async def _offer_hint(room: dict, ask_count: int, *, manual: bool = False, player: dict | None = None) -> dict | None:
+    player_id = int(player["id"]) if player else None
+    async with _hint_lock(room["id"]):
+        manual_count = 0
+        if manual:
+            if player_id is None:
+                raise HTTPException(status_code=400, detail="缺少玩家信息")
+            if await _pending_hint(room["id"], player_id):
+                raise HTTPException(status_code=400, detail="请先处理当前提示")
+            manual_count = await _manual_hint_count(room["id"], player_id)
+            if manual_count >= 3:
+                raise HTTPException(status_code=400, detail="手动提示次数已用完")
+        else:
+            latest_room = await _room(room["id"])
+            trigger = int(await get_setting("hint_trigger_count", "30"))
+            latest_ask_count = await _ask_count(room["id"])
+            last_hint_at = int(latest_room.get("last_hint_at_ask_count") or 0)
+            if trigger <= 0 or latest_ask_count < last_hint_at + trigger:
+                return None
+            if await _pending_hint(room["id"]):
+                return None
+            room = latest_room
+            ask_count = latest_ask_count
+
+        logs = await fetch_all("SELECT * FROM game_logs WHERE room_id = ? ORDER BY id ASC", (room["id"],))
+        # Model work stays outside the writer transaction. Its snapshot watermark
+        # is checked again under SQLite's cross-process lock before publication.
+        expected_last_hint = int(room.get("last_hint_at_ask_count") or 0)
+        try:
+            hint = await judge.generate_hint(room["surface"], room["answer"], logs)
+        except Exception:
+            if manual:
+                raise
+            logger.exception("auto hint generation failed: room_id=%s ask_count=%s", room["id"], ask_count)
+            hint = None
+        else:
+            if hint is None and not manual:
+                logger.warning("auto hint generation returned empty: room_id=%s ask_count=%s", room["id"], ask_count)
+        if hint is None and manual:
+            return None
+        db = await get_db()
+        try:
+            await db.execute("BEGIN IMMEDIATE")
+            latest = await _ensure_can_play_in_transaction(db, room["id"], player_id)
+            pending = await db.execute_fetchall(
+                "SELECT id FROM game_logs WHERE room_id=? AND type='hint_offer' AND resolved=0"
+                + (" AND player_id=?" if manual else ""),
+                (room["id"], player_id) if manual else (room["id"],),
+            )
+            if pending:
+                if manual:
+                    raise HTTPException(status_code=400, detail="请先处理当前提示")
+                return None
+            if manual:
+                counts = await db.execute_fetchall(
+                    "SELECT COUNT(*) AS c FROM game_logs WHERE room_id=? AND player_id=? AND type='hint_offer'",
+                    (room["id"], player_id),
+                )
+                manual_count = int(counts[0]["c"])
+                if manual_count >= 3:
+                    raise HTTPException(status_code=400, detail="手动提示次数已用完")
+                cursor = await db.execute(
+                    "INSERT INTO game_logs (room_id, player_id, type, content, hint_text, resolved) VALUES (?, ?, 'hint_offer', ?, ?, 1)",
+                    (room["id"], player_id, f"hint:{ask_count}", hint),
+                )
+                hint_id = cursor.lastrowid
+            else:
+                if int(latest.get("last_hint_at_ask_count") or 0) != expected_last_hint:
+                    return None
+                hint_id = None
+                if hint is not None:
+                    cursor = await db.execute(
+                        "INSERT INTO game_logs (room_id, type, content, hint_text) VALUES (?, 'auto_hint', ?, ?)",
+                        (room["id"], hint, hint),
+                    )
+                    hint_id = cursor.lastrowid
+                await db.execute(
+                    "UPDATE rooms SET last_hint_at_ask_count = ? WHERE id = ?",
+                    (ask_count, room["id"]),
+                )
+            await db.commit()
+        except BaseException:
+            await db.rollback()
+            raise
+        finally:
+            await db.close()
+        if manual:
+            payload = {
+                "log_id": hint_id,
+                "hint_text": hint,
+                "player_id": player_id,
+                "username": player.get("username") if player else None,
+                "is_guest": player.get("is_guest") if player else None,
+                "is_ai": player.get("is_ai") if player else None,
+                "resolved": 1,
+                "manual_hint_remaining": 3 - manual_count - 1,
+            }
+            await broadcast(room["id"], "hint_offer", payload)
+            return payload
+        if hint_id is None:
+            return None
+        payload = await _log_payload(hint_id)
+        await broadcast(room["id"], "new_log", payload)
+        return {"log_id": hint_id, "hint_text": hint}
+
+
+async def _maybe_auto_hint(room: dict, ask_count: int) -> dict | None:
+    trigger = int(await get_setting("hint_trigger_count", "30"))
+    last_hint_at = int(room.get("last_hint_at_ask_count") or 0)
+    if trigger <= 0 or ask_count < last_hint_at + trigger:
+        return None
+    if await _pending_hint(room["id"]):
+        return None
+    return await _offer_hint(room, ask_count)
+
+
+async def _maybe_auto_hint_safely(room: dict, ask_count: int) -> dict | None:
+    try:
+        return await _maybe_auto_hint(room, ask_count)
+    except Exception:
+        logger.exception("auto hint failed: room_id=%s ask_count=%s", room.get("id"), ask_count)
+        return None
+
+
+async def _ask_impl(body: ContentBody, player: dict) -> tuple[dict, asyncio.Task]:
+    """Core ask logic. Returns (payload, hint_task)."""
+    await require_room_access(body.room_id, player)
+    async with _ask_lock(body.room_id):
+        question = clean_content(body.content, 200)
+        room = await _room(body.room_id)
+        _ensure_active(room)
+        await _ensure_player_can_play(body.room_id, player)
+        if player.get("is_ai"):
+            n = int(await get_setting("ai_cooldown_questions", "5"))
+            seconds = int(await get_setting("ai_cooldown_seconds", "3"))
+            recent = await fetch_all(
+                """
+                SELECT created_at FROM game_logs
+                WHERE room_id = ? AND player_id = ? AND type = 'ask'
+                ORDER BY id DESC LIMIT ?
+                """,
+                (body.room_id, player["id"], n),
+            )
+            if len(recent) >= n:
+                too_fast = await fetch_one(
+                    """
+                    SELECT COUNT(*) AS c FROM (
+                      SELECT created_at FROM game_logs
+                      WHERE room_id = ? AND player_id = ? AND type = 'ask'
+                      ORDER BY id DESC LIMIT ?
+                    ) WHERE datetime(created_at) >= datetime('now', 'localtime', ?)
+                    """,
+                    (body.room_id, player["id"], n, f"-{seconds} seconds"),
+                )
+                if int(too_fast["c"]) >= n:
+                    raise HTTPException(status_code=429, detail="AI 提问太快了，请先思考已有线索，稍等几秒后再问。")
+        await reserve_daily_ask(player)
+        # Read before inserting this ask, while still holding the room's ask lock.
+        recent_questions = await fetch_all(
+            """
+            SELECT content FROM game_logs
+            WHERE room_id = ? AND type = 'ask' AND content != ?
+            ORDER BY id DESC LIMIT 3
+            """,
+            (body.room_id, judge.SYSTEM_BUSY_NOTICE),
+        )
+        try:
+            result = await judge.judge_ask(
+                room["surface"], room["answer"], question,
+                history=[row["content"] for row in reversed(recent_questions)],
+            )
+        except HTTPException as exc:
+            if exc.status_code == 503:
+                resp = await _system_notice(body.room_id, player["id"])
+                return resp, asyncio.create_task(asyncio.sleep(0))
+            raise
+        judgment = result["judgment"]
+        log_content = result.get("content_override") or question
+        column = {"yes": "ask_count_y", "no": "ask_count_n", "unrelated": "ask_count_u", "partial": "ask_count_p"}[judgment]
+        clue = result.get("clue")
+        clue_id = None
+        db = await get_db()
+        try:
+            await db.execute("BEGIN IMMEDIATE")
+            await _ensure_can_play_in_transaction(db, body.room_id, player["id"])
+            cursor = await db.execute(
+                "INSERT INTO game_logs (room_id, player_id, type, content, judgment) VALUES (?, ?, 'ask', ?, ?)",
+                (body.room_id, player["id"], log_content, judgment),
+            )
+            log_id = cursor.lastrowid
+            await db.execute(
+                f"UPDATE players SET ask_count = ask_count + 1, {column} = {column} + 1 WHERE id = ?",
+                (player["id"],),
+            )
+            if clue is not None:
+                published = await db.execute_fetchall(
+                    "SELECT id FROM game_logs WHERE room_id=? AND player_id=? "
+                    "AND type='auto_hint' AND judgment='auto_hint' AND hint_text=? LIMIT 1",
+                    (body.room_id, player["id"], clue),
+                )
+                if not published:
+                    cursor = await db.execute(
+                        "INSERT INTO game_logs (room_id, player_id, type, content, hint_text, judgment) VALUES (?, ?, 'auto_hint', ?, ?, 'auto_hint')",
+                        (body.room_id, player["id"], clue, clue),
+                    )
+                    clue_id = cursor.lastrowid
+            await db.execute(
+                f"UPDATE room_presence SET last_active_at = {SQL_NOW} WHERE room_id=? AND player_id=?",
+                (body.room_id, player["id"]),
+            )
+            await db.commit()
+        except BaseException:
+            await db.rollback()
+            raise
+        finally:
+            await db.close()
+        payload = await _log_payload(log_id)
+        await broadcast(body.room_id, "new_log", payload)
+        if clue_id is not None:
+            clue_payload = await _log_payload(clue_id)
+            await broadcast(body.room_id, "new_log", clue_payload)
+
+        ask_count = await _ask_count(body.room_id)
+        hint_task = asyncio.create_task(_maybe_auto_hint_safely(room, ask_count))
+        return payload, hint_task
+
+
+@router.get("/ask-quota")
+async def ask_quota(player: dict = Depends(authenticated_player)):
+    return await get_ask_quota(player)
+
+
+@router.post("/ask")
+async def ask(body: ContentBody, player: dict = Depends(current_player)):
+    payload, _ = await _ask_impl(body, player)
+    return payload
+
+
+@router.post("/guess")
+async def guess(body: GuessBody, player: dict = Depends(current_player)):
+    await require_room_access(body.room_id, player)
+    guess_text = clean_content(body.content, 3000)
+    room = await _room(body.room_id)
+    _ensure_active(room)
+    await _ensure_player_can_play(body.room_id, player)
+    try:
+        result = await judge.judge_guess(room["surface"], room["answer"], guess_text)
+    except HTTPException as exc:
+        if exc.status_code == 503:
+            return await _system_notice(body.room_id, player["id"])
+        raise
+    correct = bool(result["success"])
+    score = int(result["score"])
+    reveal_text = None
+    if correct:
+        public_source = judge.public_answer_from_full_answer(room["answer"])
+        # Structured author answers are authoritative: a model can repeat private
+        # rules without their headings, which cannot be safely filtered afterward.
+        if public_source != room["answer"].strip():
+            reveal_text = public_source
+        else:
+            reveal_text = judge.public_answer_from_full_answer(result.get("answer") or room["answer"])
+    result_content = (f"还原度：{score}%\n{reveal_text}" if correct
+                      else result.get("error") or f"还原度：{score}%")
+    db = await get_db()
+    try:
+        # The judge runs outside this transaction. Recheck every eligibility
+        # condition after acquiring the writer, including personal answer reveals.
+        await db.execute("BEGIN IMMEDIATE")
+        rows = await db.execute_fetchall("SELECT status FROM rooms WHERE id=?", (body.room_id,))
+        if not rows:
+            raise HTTPException(status_code=404, detail="房间不存在")
+        _ensure_active(rows[0])
+        revealed = await db.execute_fetchall(
+            "SELECT 1 FROM room_answer_reveals WHERE room_id=? AND player_id=?",
+            (body.room_id, player["id"]),
+        )
+        if revealed:
+            raise HTTPException(status_code=400, detail=ANSWER_REVEALED_STATUS_HINT)
+        cursor = await db.execute(
+            "INSERT INTO game_logs (room_id, player_id, type, content, judgment) VALUES (?, ?, 'guess', ?, ?)",
+            (body.room_id, player["id"], guess_text, "yes" if correct else "no"),
+        )
+        log_id = cursor.lastrowid
+        await _write_judge_audit(room_id=body.room_id, player_id=player["id"],
+                                 game_log_id=log_id, action="guess", result=result, db=db)
+        if correct:
+            await db.execute(
+                f"UPDATE rooms SET status = 'finished', winner_id = ?, finished_at = {SQL_NOW} WHERE id = ?",
+                (player["id"], body.room_id),
+            )
+            await db.execute("UPDATE players SET win_count = win_count + 1 WHERE id = ?", (player["id"],))
+            await db.execute(
+                "UPDATE players SET game_count = game_count + 1 WHERE id IN "
+                "(SELECT DISTINCT player_id FROM game_logs WHERE room_id = ? "
+                "AND type IN ('ask','guess') AND player_id IS NOT NULL)", (body.room_id,),
+            )
+        cursor = await db.execute(
+            "INSERT INTO game_logs (room_id, type, content, judgment) VALUES (?, 'system', ?, ?)",
+            (body.room_id, result_content, "game_over" if correct else "guess_result"),
+        )
+        result_id = cursor.lastrowid
+        await db.execute(
+            f"UPDATE room_presence SET last_active_at = {SQL_NOW} WHERE room_id=? AND player_id=?",
+            (body.room_id, player["id"]),
+        )
+        await db.commit()
+    except BaseException:
+        await db.rollback()
+        raise
+    finally:
+        await db.close()
+    payload = await _log_payload(log_id)
+    result_payload = await _log_payload(result_id)
+    await broadcast(body.room_id, "new_log", payload)
+    await broadcast(body.room_id, "new_log", result_payload)
+    if correct:
+        await broadcast(body.room_id, "game_over", {"answer": reveal_text, "winner": {"id": player["id"], "username": player.get("username") or f"游客{player['id']}"}})
+    return payload | {"correct": correct, "score": score, "result_log": result_payload}
+
+
+@router.post("/reveal-answer")
+async def reveal_answer(body: RevealAnswerBody, player: dict = Depends(current_player)):
+    await require_room_access(body.room_id, player)
+    room = await _room(body.room_id)
+    _ensure_active(room)
+    if not body.confirm_reveal:
+        return {
+            "confirmation_required": True,
+            "answer_revealed": False,
+            "message": "查看汤底需要再次确认。确认后你会立即看到完整汤底；房间不会结束，其他玩家可以继续推理，但你不能再参与本局答题、请求提示或操作记事板。若确认，请再次调用并传 confirm_reveal=true。",
+        }
+    reveal_answer_text = judge.public_answer_from_full_answer(room["answer"])
+    db = await get_db()
+    try:
+        await db.execute("BEGIN IMMEDIATE")
+        rows = await db.execute_fetchall("SELECT status FROM rooms WHERE id=?", (body.room_id,))
+        if not rows:
+            raise HTTPException(status_code=404, detail="房间不存在")
+        _ensure_active(rows[0])
+        await db.execute(
+            "INSERT OR IGNORE INTO room_answer_reveals (room_id, player_id) VALUES (?, ?)",
+            (body.room_id, player["id"]),
+        )
+        await db.commit()
+    except BaseException:
+        await db.rollback()
+        raise
+    finally:
+        await db.close()
+    await touch_room(body.room_id, player["id"])
+    return {"answer": reveal_answer_text, "answer_revealed": True}
+
+
+@router.post("/hint/request")
+async def hint_request(body: HintRequestBody, player: dict = Depends(current_player)):
+    await require_room_access(body.room_id, player)
+    room = await _room(body.room_id)
+    _ensure_active(room)
+    await _ensure_player_can_play(body.room_id, player)
+    ask_count = await _ask_count(body.room_id)
+    payload = await _offer_hint(room, ask_count, manual=True, player=player)
+    if payload is None:
+        raise HTTPException(status_code=503, detail="暂时无法生成提示，请稍后再试")
+    return payload
+
+
+@router.post("/hint/respond")
+async def hint_respond(body: HintResponseBody, player: dict = Depends(current_player)):
+    await require_room_access(body.room_id, player)
+    db = await get_db()
+    try:
+        await db.execute("BEGIN IMMEDIATE")
+        rows = await db.execute_fetchall(
+            "SELECT * FROM game_logs WHERE id = ? AND room_id = ? AND type = 'hint_offer'",
+            (body.log_id, body.room_id),
+        )
+        if not rows:
+            raise HTTPException(status_code=404, detail="提示不存在")
+        hint = dict(rows[0])
+        if hint["player_id"] is not None and int(hint["player_id"]) != int(player["id"]):
+            raise HTTPException(status_code=403, detail="只能处理自己的提示")
+        # Preserve the legacy HTTP 409 contract on retries. The response log and
+        # resolved flag now commit together, so retries cannot lose/duplicate it.
+        if hint["resolved"]:
+            raise HTTPException(status_code=409, detail="提示已处理")
+        await db.execute("UPDATE game_logs SET resolved = 1 WHERE id = ?", (body.log_id,))
+        await db.execute(
+            "INSERT INTO game_logs (room_id, player_id, type, content) VALUES (?, ?, ?, ?)",
+            (body.room_id, player["id"], "hint_accept" if body.accept else "hint_reject", str(body.log_id)),
+        )
+        await db.commit()
+    except BaseException:
+        await db.rollback()
+        raise
+    finally:
+        await db.close()
+    data = {"log_id": body.log_id, "accept": body.accept}
+    if body.accept:
+        data["hint_text"] = hint["hint_text"]
+    await broadcast(body.room_id, "hint_resolved", data)
+    return data
+
+
+@router.post("/generate")
+async def generate(body: dict | None = Body(default=None), player: dict = Depends(current_player)):
+    del player
+    style = str((body or {}).get("style") or "horror")
+    return await judge.generate_puzzle(style)
+
+
+@router.get("/public-settings")
+async def public_settings(player: dict = Depends(current_player)):
+    del player
+    return {
+        "generate_cooldown_seconds": int(await get_setting("generate_cooldown_seconds", "5")),
+        "answer_reveal_prompt_count": int(await get_setting("answer_reveal_prompt_count", "50")),
+    }

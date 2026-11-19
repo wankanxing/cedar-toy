@@ -1,0 +1,250 @@
+import json
+import re
+
+from command_text import normalize_command_spaces
+from save_locks import save_directory_locks
+
+from .base import (
+    SAVE_ROOT,
+    VendorCmdError,
+    VendorCmdGame,
+    export_json_saves,
+    import_json_saves,
+    require_player_id,
+    require_save_confirm,
+)
+
+
+MAX_BUY_AMOUNT = 500
+GUEST_TRIAL_CHIPS = 200
+SAVE_FILES = {
+    "arcade_save.json": "arcade_save.json",
+    "slots_save.json": "slots_save.json",
+    "blackjack_save.json": "blackjack_save.json",
+    "roulette_save.json": "roulette_save.json",
+}
+ARCADE_SAVE_DEFAULT = {
+    "chips": 0,
+    "total_bought": 0,
+    "total_cashed": 0,
+    "winnings": 0,
+    "visits": 0,
+    "current_game": None,
+    "owned": [],
+    "equipped": [],
+    "decor": [],
+}
+
+
+RUNNER_CODE = r'''
+import json
+import os
+import sys
+
+payload = json.load(sys.stdin)
+save_dir = payload["save_dir"]
+vendor_dir = payload["vendor_dir"]
+command = payload.get("command") or "help"
+guest_trial_chips = int(payload.get("extra", {}).get("guest_trial_chips") or 0)
+
+sys.path.insert(0, vendor_dir)
+import arcade
+import blackjack
+import roulette
+import slots
+
+arcade._SAVE = os.path.join(save_dir, "arcade_save.json")
+slots._SAVE = os.path.join(save_dir, "slots_save.json")
+blackjack._SAVE = os.path.join(save_dir, "blackjack_save.json")
+roulette._SAVE = os.path.join(save_dir, "roulette_save.json")
+
+if payload.get("reset"):
+    for name in ("arcade_save.json", "slots_save.json", "blackjack_save.json", "roulette_save.json"):
+        try:
+            os.remove(os.path.join(save_dir, name))
+        except FileNotFoundError:
+            pass
+
+if guest_trial_chips > 0 and not os.path.exists(arcade._SAVE):
+    trial_state = arcade._load()
+    trial_state["chips"] = guest_trial_chips
+    trial_state["trial_granted"] = True
+    arcade._save(trial_state)
+    trial_granted = True
+else:
+    trial_granted = False
+
+trial_hint = (
+    f"\n\n🎟️ 游客体验筹码 {guest_trial_chips}；输光后请注册账号并绑定人类，"
+    "之后可由人类发放筹码。"
+    if trial_granted else ""
+)
+
+if payload.get("reset"):
+
+    # Reset must always leave a complete save set, even when the requested
+    # command is read-only and would not save anything itself.
+    enter_text = arcade.cmd("enter")
+    for game in (slots, blackjack, roulette):
+        game._save(game._load())
+
+    if command.strip().lower() == "enter":
+        print(enter_text + trial_hint, end="")
+        raise SystemExit(0)
+
+print(arcade.cmd(command) + trial_hint, end="")
+'''
+
+
+GAME = VendorCmdGame("arcade", "vendor/claude-arcade", RUNNER_CODE)
+
+
+def _save_dir(player_id, *, create=True):
+    player_id = require_player_id(player_id)
+    path = SAVE_ROOT / "arcade" / player_id
+    if create:
+        path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _load_state(save_path):
+    try:
+        with save_path.open("r", encoding="utf-8") as fh:
+            state = json.load(fh)
+    except FileNotFoundError:
+        state = {}
+    except json.JSONDecodeError:
+        state = {}
+    merged = dict(ARCADE_SAVE_DEFAULT)
+    if isinstance(state, dict):
+        merged.update(state)
+    return merged
+
+
+def _has_save(player_id):
+    save_dir = _save_dir(player_id, create=False)
+    return any((save_dir / name).exists() for name in SAVE_FILES)
+
+
+def _guest_trial_eligible(player_id, has_save):
+    return isinstance(player_id, str) and player_id.startswith("guest:") and not has_save
+
+
+def _status_from_state(state):
+    return {
+        "chips": int(state.get("chips") or 0),
+        "winnings": int(state.get("winnings") or 0),
+        "total_bought": int(state.get("total_bought") or 0),
+        "total_cashed": int(state.get("total_cashed") or 0),
+    }
+
+
+def status(player_id):
+    save_dir = _save_dir(player_id, create=False)
+    if not save_dir.exists():
+        return _status_from_state({})
+    with save_directory_locks(save_dir):
+        return _status_from_state(_load_state(save_dir / "arcade_save.json"))
+
+
+def save_summary(player_id):
+    """给平台 my_saves 用：有档返回筹码概况，无档返回 None。"""
+    save_dir = _save_dir(player_id, create=False)
+    if not (save_dir / "arcade_save.json").exists():
+        return None
+    return status(player_id)
+
+
+def grant_chips(player_id, amount):
+    try:
+        amount = int(amount)
+    except (TypeError, ValueError):
+        raise VendorCmdError("筹码金额必须是整数")
+    if amount < 1 or amount > MAX_BUY_AMOUNT:
+        raise VendorCmdError(f"街机厅单次发放筹码必须在 1-{MAX_BUY_AMOUNT} 之间")
+
+    save_dir = _save_dir(player_id, create=False)
+    save_path = save_dir / "arcade_save.json"
+    with save_directory_locks(save_dir):
+        save_dir.mkdir(parents=True, exist_ok=True)
+        state = _load_state(save_path)
+        state["chips"] = int(state.get("chips") or 0) + amount
+        state["total_bought"] = int(state.get("total_bought") or 0) + amount
+        with save_path.open("w", encoding="utf-8") as fh:
+            json.dump(state, fh, ensure_ascii=False)
+        return _status_from_state(state)
+
+
+def _rewrite_platform_funding_hints(text):
+    replacements = {
+        "赌资找金主要——问她注多少，再 buy [金额]。": "赌资由人类在 CedarToy 网页端发放。",
+        "buy [金额]       买筹码（找金主要）": "筹码由人类在 CedarToy 网页端发放",
+        "  buy [金额]      买筹码\n": "  筹码            由人类在 CedarToy 网页端发放\n",
+        "（……再给一点？buy [金额]）": "（……再给一点？让你的人类在 CedarToy 网页端发放筹码。）",
+    }
+    for old, new in replacements.items():
+        text = text.replace(old, new)
+    return text
+
+
+def _guard_command(command):
+    # 先归一化再匹配：BOM(U+FEFF) 不属于 `\s`，`buy﻿500` 能绕过这道 guard，
+    # 但下游 GAME.run 又会把它折叠成合法的 `buy 500` —— 等于白送筹码。
+    text = normalize_command_spaces(str(command or ""))
+    match = re.match(r"^buy\s+(\d+)\b", text, re.IGNORECASE)
+    if match:
+        raise VendorCmdError("街机厅筹码只能由人类在网页端发放；让你的人类打开街机厅卡片，输入金额后发放。")
+    return text
+
+
+def play(arguments):
+    action = (arguments.get("action") or "cmd").strip()
+    player_id = arguments.get("player_id")
+    if action in {"new", "arcade_new"}:
+        has_save = _has_save(player_id)
+        require_save_confirm(arguments, lambda: has_save, save_summary, "arcade")
+        command = _guard_command(arguments.get("command") or "enter")
+        text = _rewrite_platform_funding_hints(GAME.run(
+            player_id,
+            command,
+            reset=True,
+            extra={
+                "guest_trial_chips": GUEST_TRIAL_CHIPS
+                if _guest_trial_eligible(player_id, has_save)
+                else 0
+            },
+        ))
+    elif action in {"cmd", "arcade_cmd"}:
+        command = arguments.get("command")
+        if not isinstance(command, str) or not command.strip():
+            raise VendorCmdError("command 参数必填")
+        command = _guard_command(command)
+        has_save = _has_save(player_id)
+        text = _rewrite_platform_funding_hints(GAME.run(
+            player_id,
+            command,
+            extra={
+                "guest_trial_chips": GUEST_TRIAL_CHIPS
+                if _guest_trial_eligible(player_id, has_save)
+                else 0
+            },
+        ))
+    elif action == "export":
+        text = export_json_saves(
+            "arcade",
+            player_id,
+            SAVE_FILES,
+            packaged=True,
+        )
+    elif action == "import":
+        require_save_confirm(arguments, lambda: _has_save(player_id), save_summary, "arcade")
+        text = import_json_saves(
+            "arcade",
+            player_id,
+            arguments.get("save_data"),
+            SAVE_FILES,
+            packaged=True,
+        )
+    else:
+        raise VendorCmdError("未知 arcade action")
+    return {"game": "arcade", "player_id": player_id, "text": text}
